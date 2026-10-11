@@ -1,0 +1,13 @@
+{
+  "name": "spellcaster-academy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A spelling game for young witches: every spelling word is a spell. Plain static site, no build step.",
+  "scripts": {
+    "start": "node scripts/serve.mjs",
+    "test": "node scripts/test.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.64.0"
+  }
+}

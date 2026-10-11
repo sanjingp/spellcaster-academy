@@ -1,0 +1,22 @@
+# Render blueprint: Spellcaster Academy is a plain static site (no build step).
+services:
+  - type: web
+    name: spellcaster-academy
+    runtime: static
+    buildCommand: echo "Nothing to build - plain static files"
+    staticPublishPath: ./public
+    headers:
+      # Always fetch the latest version, so a fix reaches the iPad on the next visit.
+      - path: /*
+        name: Cache-Control
+        value: no-cache
+      # The game never talks to the network. This makes the browser enforce it.
+      - path: /*
+        name: Content-Security-Policy
+        value: "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+      - path: /*
+        name: Referrer-Policy
+        value: no-referrer
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
