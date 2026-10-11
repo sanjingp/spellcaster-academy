@@ -592,6 +592,14 @@ textarea:focus-visible {
   color: var(--ink);
 }
 
+/* The "no voice" note needs room on the home screen: on a short upright iPad
+   the witch gives up a little of hers. */
+@media (orientation: portrait) {
+  .is-quiet #screen-home .caster-big {
+    width: clamp(180px, min(44vw, 27vh), 400px);
+  }
+}
+
 /* ------------------------------------------------------------------ play */
 
 .play-screen > .stage,
@@ -633,6 +641,7 @@ textarea:focus-visible {
 }
 
 .prompt-card {
+  --listen: 64px; /* height of the listen buttons, and of a peeked word that takes their place */
   flex: 1 1 auto;
   min-width: 0;
   max-width: 720px;
@@ -699,7 +708,10 @@ textarea:focus-visible {
   line-height: 1.1;
 }
 
+/* The word to copy. Every size inside is in em, so game.js can shrink a long
+   word to fit its card just by lowering the font size. */
 .model {
+  flex: 0 0 auto;
   display: flex;
   justify-content: center;
   gap: 0.12em;
@@ -707,6 +719,7 @@ textarea:focus-visible {
   font-weight: 900;
   line-height: 1.05;
   letter-spacing: 0.06em;
+  white-space: nowrap;
   color: #6a34c8;
 }
 
@@ -714,10 +727,15 @@ textarea:focus-visible {
   animation: letter-in 0.4s cubic-bezier(0.2, 1.5, 0.4, 1) both;
 }
 
+/* A peek takes the place of the listen buttons, and is exactly as tall, so
+   nothing below the card moves while the word flashes. */
 .model.is-peek {
-  padding: 2px 18px;
+  align-items: center;
+  height: var(--listen);
+  padding: 0 0.3em;
   border-radius: 16px;
   background: #fff3c4;
+  font-size: clamp(36px, 6.4vmin, 52px);
 }
 
 .listen-row {
@@ -727,8 +745,17 @@ textarea:focus-visible {
   gap: var(--gap);
 }
 
+/* On the spelling card the note sits under the buttons, so it is kept small. */
+.prompt-card > .speech-note {
+  padding: 5px 12px;
+  border-radius: 14px;
+  background: #f4ebff;
+  font-size: 16px;
+  line-height: 1.25;
+}
+
 .btn-listen {
-  min-height: 64px;
+  min-height: var(--listen, 64px);
   padding: 0 24px;
   font-size: clamp(20px, 3vmin, 26px);
   color: #fff;
@@ -1907,6 +1934,19 @@ textarea:focus-visible {
   font-weight: 600;
 }
 
+/* Only shown while the browser refuses to keep the save. Calm, not alarming. */
+.save-note {
+  flex: 0 0 auto;
+  padding: 14px 18px;
+  border-radius: 18px;
+  border: 3px solid var(--gold-deep);
+  background: #fff3c4;
+  font-size: 19px;
+  line-height: 1.35;
+  font-weight: 800;
+  color: #6b4300;
+}
+
 .parent-label,
 .parent-fine {
   display: block;
@@ -2166,11 +2206,8 @@ textarea:focus-visible {
 /* Short screens (small iPads sideways): tighten the play screen a little. */
 @media (orientation: landscape) and (max-height: 720px) {
   .prompt-card {
+    --listen: 60px;
     gap: 6px;
-  }
-
-  .btn-listen {
-    min-height: 60px;
   }
 
   .btn-cast,

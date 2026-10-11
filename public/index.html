@@ -97,10 +97,10 @@
           </ol>
           <h2 id="prompt-title" class="prompt-title">Copy the spell</h2>
           <div id="model" class="model" aria-live="polite"></div>
-          <div class="listen-row">
+          <div id="listen-row" class="listen-row">
             <button id="btn-hear" class="btn btn-listen" type="button"><span aria-hidden="true">🔊</span> Hear it again</button>
             <button id="btn-slow" class="btn btn-listen btn-listen-small" type="button"><span aria-hidden="true">🐢</span> Slowly</button>
-            <button id="btn-peek" class="btn btn-listen" type="button" hidden><span aria-hidden="true">👀</span> Peek at the spell</button>
+            <button id="btn-peek" class="btn btn-listen" type="button" hidden><span aria-hidden="true">👀</span> <span id="peek-label">Peek at the spell</span></button>
           </div>
           <p class="speech-note" data-speech-note="spells" hidden></p>
         </div>
@@ -269,6 +269,10 @@
         <span class="topbar-spacer"></span>
       </header>
       <div class="parent-body">
+        <p id="save-note" class="save-note" role="status" hidden>
+          <span aria-hidden="true">💾</span> This device is not letting the game save right now (private browsing, or storage is full).
+          Everything still works, but changes last only for this visit.
+        </p>
         <div class="panel">
           <h3 class="pick-title">Spelling words</h3>
           <label class="parent-label" for="word-input">

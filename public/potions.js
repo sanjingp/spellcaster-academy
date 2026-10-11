@@ -141,11 +141,11 @@ window.SPELLCASTER_POTIONS = (() => {
       });
     },
 
-    // Skip counting: five numbers in a row, one of them missing.
-    skip(start, step, blank) {
-      const all = [0, 1, 2, 3, 4].map((i) => start + i * step);
+    // Skip counting: `count` numbers in a row (five unless told otherwise), one of them missing.
+    skip(start, step, blank, count = 5) {
+      const all = Array.from({ length: count }, (_, i) => start + i * step);
       const items = all.map((n, i) => (i === blank ? null : n));
-      return recipe('skip', `${start}:${step}:${blank}`, {
+      return recipe('skip', `${start}:${step}:${blank}:${count}`, {
         title: `Count by ${step}s`,
         show: { type: 'sequence', items },
         say: `Count by ${STEP_NAMES[step]}. ${items.map((n) => (n === null ? 'blank' : n)).join(', ')}. What number is missing?`,
@@ -252,9 +252,15 @@ window.SPELLCASTER_POTIONS = (() => {
     },
 
     skip(level) {
+      // Easy: ask what comes next, and never count past 20. That makes the rows
+      // short (5, 10, 15, ?) and leaves only 0, 10, ? for the tens, so tens are rarer.
+      if (level === 'easy') {
+        const small = pick([2, 2, 2, 5, 5, 10]);
+        const count = randInt(3, Math.min(5, 20 / small + 1));
+        const first = small * randInt(0, 20 / small - (count - 1));
+        return build.skip(first, small, count - 1, count);
+      }
       const step = pick([2, 5, 10]);
-      // Easy: start low and ask what comes next.
-      if (level === 'easy') return build.skip(step * randInt(1, 6), step, 4);
       let start = step * randInt(1, (100 - 4 * step) / step);
       if (step === 10 && Math.random() < 0.4) start = randInt(1, 59); // 13, 23, 33 ...
       return build.skip(start, step, randInt(2, 4));

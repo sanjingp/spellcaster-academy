@@ -22,6 +22,7 @@
   const SLOW_RATE = 0.55;
   const PROBLEM_SLOW_RATE = 0.65; // a whole sentence, so not quite as slow as one word
   const PEEK_MS = 2600;
+  const RETRY_GAP = 3; // a missed spell or potion comes back after this many others
 
   const STEP_TITLES = {
     1: 'Copy the spell',
@@ -103,7 +104,7 @@
       words: DATA.starterWords.slice(),
       custom: false,
       roundSize: 5, // 0 means "all words"
-      progress: {}, // word -> { step, mastered, best, last }
+      progress: Object.create(null), // word -> { step, mastered, best, last }; no prototype, so any word is a safe key
       math: freshMath(),
       stars: 0, // shared by spells and potions
       robe: DATA.robes[0].id,
@@ -111,6 +112,20 @@
       chimes: true,
     };
   }
+
+  // Private browsing or a full disk can stop the browser from keeping anything.
+  function storageWorks() {
+    try {
+      const key = `${STORE_KEY}-check`;
+      window.localStorage.setItem(key, '1');
+      window.localStorage.removeItem(key);
+      return true;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  let storageOk = storageWorks(); // false while saving does not work; grown-ups are told
 
   function loadState() {
     const state = freshState();
@@ -159,18 +174,28 @@
     return state;
   }
 
+  // Returns true only if the save really was written.
   function saveState() {
+    let ok = true;
     try {
       window.localStorage.setItem(STORE_KEY, JSON.stringify(state));
     } catch (err) {
       // Storage may be full or blocked; the game still works for this visit.
+      ok = false;
     }
+    if (ok !== storageOk) {
+      storageOk = ok;
+      renderSaveNote();
+    }
+    return ok;
   }
 
   let state = loadState();
 
   function progressFor(word) {
-    if (!state.progress[word]) state.progress[word] = { step: 1, mastered: 0, best: 0, last: 0 };
+    if (!Object.prototype.hasOwnProperty.call(state.progress, word)) {
+      state.progress[word] = { step: 1, mastered: 0, best: 0, last: 0 };
+    }
     return state.progress[word];
   }
 
@@ -180,6 +205,11 @@
   // ------------------------------------------------------------------
   // Speech (Web Speech API). Safari only talks after a tap, so the big
   // Start button says the first sentence.
+  //
+  // Only voices that live on this device (`localService === true`) are ever
+  // used. A remote voice would send the words to a server, and nothing in this
+  // game leaves the iPad. With no such voice the game stays quiet and shows
+  // the word instead.
   // ------------------------------------------------------------------
   const PREFERRED_VOICES = [
     'samantha', 'ava', 'allison', 'susan', 'zoe', 'nicky', 'joelle', 'noelle', 'evan',
@@ -192,14 +222,25 @@
   ];
 
   const speech = {
-    // 'ok' | 'novoices' (API there but nothing to speak with) | 'missing'
+    // 'ok'       an on-device voice is ready (or still loading, just after the page opens)
+    // 'failed'   there is a voice, but its last try to speak did not work
+    // 'novoices' the browser can speak, but has no voice on this device
+    // 'missing'  the browser cannot speak at all
     status: 'speechSynthesis' in window && window.speechSynthesis &&
       typeof window.SpeechSynthesisUtterance === 'function' ? 'ok' : 'missing',
     voice: null,
-    current: null, // keeps the utterance alive; Safari drops it mid-word otherwise
+    live: new Set(), // what is being said now; also keeps it alive (Safari drops it mid-word otherwise)
     checkTimer: 0,
 
     get works() { return this.status === 'ok'; },
+    // There is a voice worth another try, even if its last try failed.
+    get canTry() { return this.status === 'ok' || this.status === 'failed'; },
+
+    setStatus(next) {
+      if (next === this.status) return;
+      this.status = next;
+      onSpeechChange();
+    },
 
     voices() {
       try {
@@ -210,6 +251,7 @@
     },
 
     scoreVoice(voice) {
+      if (voice.localService !== true) return -1; // never a remote voice
       const lang = String(voice.lang || '').replace('_', '-').toLowerCase();
       if (!lang.startsWith('en')) return -1;
       const name = String(voice.name || '').toLowerCase();
@@ -217,7 +259,6 @@
       const liked = PREFERRED_VOICES.findIndex((p) => name.includes(p));
       if (liked >= 0) score += 60 - liked;
       if (/enhanced|premium|natural/.test(name)) score += 8;
-      if (voice.localService) score += 4;
       if (SILLY_VOICES.some((s) => name.startsWith(s))) score -= 90;
       return score;
     },
@@ -237,13 +278,12 @@
       return best;
     },
 
-    // If the browser has the API but never offers a voice, fall back to peeking.
+    // Looks for an on-device voice again. Finding one does not mend a voice
+    // that failed: that takes a try that really speaks (see `say`).
     checkVoices() {
       if (this.status === 'missing') return;
-      const before = this.status;
-      this.status = this.voices().length ? 'ok' : 'novoices';
-      if (this.status === 'ok') this.pickVoice();
-      if (before !== this.status) onSpeechChange();
+      if (!this.pickVoice()) this.setStatus('novoices');
+      else if (this.status === 'novoices') this.setStatus('ok');
     },
 
     scheduleCheck() {
@@ -252,33 +292,46 @@
       this.checkTimer = setTimeout(() => this.checkVoices(), 1200);
     },
 
+    // Stops whatever is being said. The "error" that follows is our own doing, not a broken voice.
+    cancel() {
+      this.live.clear();
+      window.speechSynthesis.cancel();
+    },
+
     say(text, { rate = WORD_RATE, pitch = 1.1, queue = false } = {}) {
       if (this.status === 'missing') return false;
+      const voice = this.voice || this.pickVoice();
+      if (!voice) {
+        // Stay quiet rather than let the browser choose a voice that may be remote.
+        this.setStatus('novoices');
+        return false;
+      }
+      if (this.status === 'novoices') this.setStatus('ok');
       try {
         const synth = window.speechSynthesis;
-        if (!queue) synth.cancel();
+        if (!queue) this.cancel();
         const utter = new window.SpeechSynthesisUtterance(text);
-        const voice = this.voice || this.pickVoice();
-        if (voice) utter.voice = voice;
-        utter.lang = voice ? voice.lang : 'en-US';
+        utter.voice = voice;
+        utter.lang = voice.lang;
         utter.rate = rate;
         utter.pitch = pitch;
         utter.volume = 1;
-        utter.onerror = (event) => {
-          const reason = event && event.error;
-          if (reason === 'synthesis-unavailable' || reason === 'voice-unavailable' ||
-              reason === 'language-unavailable' || reason === 'synthesis-failed') {
-            this.status = 'novoices';
-            onSpeechChange();
-          }
+        utter.onstart = () => {
+          if (this.live.has(utter) && this.status === 'failed') this.setStatus('ok'); // it really spoke
         };
-        this.current = utter;
+        utter.onend = () => this.live.delete(utter);
+        utter.onerror = (event) => {
+          if (!this.live.delete(utter)) return; // we stopped it ourselves
+          const reason = event && event.error;
+          if (reason === 'canceled' || reason === 'interrupted') return; // cut short, not broken
+          if (this.status === 'ok') this.setStatus('failed');
+        };
+        this.live.add(utter);
         if (synth.paused) synth.resume();
         synth.speak(utter);
         return true;
       } catch (err) {
-        this.status = 'missing';
-        onSpeechChange();
+        this.setStatus('missing');
         return false;
       }
     },
@@ -286,7 +339,7 @@
     hush() {
       if (this.status === 'missing') return;
       try {
-        window.speechSynthesis.cancel();
+        this.cancel();
       } catch (err) { /* nothing to stop */ }
     },
   };
@@ -495,16 +548,19 @@
   // Speech notes (shown only when the device cannot talk)
   // ------------------------------------------------------------------
   const SPEECH_NOTES = {
-    home: '🔇 This device can’t talk out loud. You can still play — everything is shown on the screen!',
-    spells: '🔇 This device can’t say the spells out loud. You can still play — the spell will flash for a moment instead!',
+    home: '🔇 No voice right now. You can still play — everything is shown on the screen!',
+    spells: '🔇 No voice right now. Look at the spell instead!', // short: it shares the card with the buttons
     potions: '🔇 This device can’t read out loud. You can still brew — every recipe is written right here!',
   };
 
   function onSpeechChange() {
     for (const node of $$('[data-speech-note]')) {
-      node.textContent = speech.works ? '' : SPEECH_NOTES[node.dataset.speechNote];
-      node.hidden = speech.works;
+      // Potions keeps its Hear buttons while there is a voice to try, so its note waits until there is none.
+      const quiet = node.dataset.speechNote === 'potions' ? !speech.canTry : !speech.works;
+      node.textContent = quiet ? SPEECH_NOTES[node.dataset.speechNote] : '';
+      node.hidden = !quiet;
     }
+    document.body.classList.toggle('is-quiet', !speech.works); // the home screen makes room for its note
     renderVoiceStatus();
     if (activeScreen === 'play' && turn) {
       renderListenRow();
@@ -642,6 +698,7 @@
   const modelBox = $('#model');
   const undoBtn = $('#btn-undo');
   const castBtn = $('#btn-cast');
+  let peekTimer = 0; // running while the spell is flashing on screen
 
   function renderRoundProgress() {
     const potions = session.mode === 'potions';
@@ -661,6 +718,7 @@
     modelBox.className = `model ${className || ''}`;
     for (const ch of word) modelBox.append(el('span', 'model-letter', ch));
     modelBox.hidden = false;
+    fitModel();
   }
 
   function hideModel() {
@@ -668,11 +726,30 @@
     modelBox.textContent = '';
   }
 
+  // A long word is shrunk until all of it fits inside the card.
+  function fitModel() {
+    modelBox.style.fontSize = '';
+    if (modelBox.hidden) return;
+    const card = modelBox.parentElement;
+    const style = window.getComputedStyle(card);
+    const room = card.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+    const need = modelBox.offsetWidth; // its sizes are all in em, so it scales with the font
+    if (room <= 0 || need <= room) return;
+    const size = parseFloat(window.getComputedStyle(modelBox).fontSize);
+    modelBox.style.fontSize = `${Math.floor((size * room) / need)}px`;
+  }
+
+  // Hear buttons while there is a voice to try, Peek whenever the voice cannot be
+  // counted on. Buttons that could do nothing are not shown at all.
   function renderListenRow() {
-    const canTryVoice = speech.status !== 'missing';
-    $('#btn-hear').hidden = !canTryVoice;
-    $('#btn-slow').hidden = !canTryVoice;
-    $('#btn-peek').hidden = speech.works || turn.step === 1;
+    const canHear = speech.canTry;
+    const canPeek = !speech.works && turn.step > 1;
+    $('#btn-hear').hidden = !canHear;
+    $('#btn-slow').hidden = !speech.works;
+    $('#btn-peek').hidden = !canPeek;
+    $('#peek-label').textContent = canHear ? 'Peek' : 'Peek at the spell';
+    // A flashing spell takes the buttons' place, so the card never grows over the tiles.
+    $('#listen-row').hidden = peekTimer !== 0 || !(canHear || canPeek);
   }
 
   function renderTurn() {
@@ -782,20 +859,21 @@
   }
 
   // Without a voice, flash the word briefly: look, cover, spell.
-  let peekTimer = 0;
-
   function peek() {
     if (!turn || turn.busy || turn.step === 1) return;
     turn.peeked = true;
     clearTimeout(peekTimer);
-    showModel(turn.word, 'is-peek');
     peekTimer = setTimeout(stopPeek, PEEK_MS);
+    renderListenRow();
+    showModel(turn.word, 'is-peek');
   }
 
   function stopPeek() {
     clearTimeout(peekTimer);
     peekTimer = 0;
-    if (turn && turn.step !== 1) hideModel();
+    if (!turn) return;
+    if (turn.step !== 1) hideModel();
+    renderListenRow();
   }
 
   function cast() {
@@ -859,11 +937,26 @@
       saved.step = item.step;
       info.to = item.step;
       // Correct: come back after two other spells. Missed: a few turns later.
-      const gap = ok ? 2 : 3;
-      session.queue.splice(Math.min(gap, session.queue.length), 0, item);
+      requeue(item, ok ? 2 : RETRY_GAP, !ok);
     }
     saveState();
     return info;
+  }
+
+  // Puts a spell or potion back in line, `gap` turns from now. A missed one that
+  // is already waiting keeps its place: nothing is put in front of it, so it
+  // always comes back within a few turns however well the others go.
+  function requeue(item, gap, missed) {
+    const queue = session.queue;
+    item.waiting = missed;
+    let at = Math.min(gap, queue.length);
+    for (let i = queue.length - 1; i >= at; i--) {
+      if (queue[i].waiting) {
+        at = i + 1;
+        break;
+      }
+    }
+    queue.splice(at, 0, item);
   }
 
   function newUnlocks(before, after) {
@@ -1177,8 +1270,9 @@
   };
 
   // Either the listen buttons or the "can't read out loud" note, never both.
+  // The buttons stay while there is a voice to try: the recipe is on screen anyway.
   function renderBrewListenRow() {
-    $('#brew-listen').hidden = !speech.works;
+    $('#brew-listen').hidden = !speech.canTry;
   }
 
   function renderBrew() {
@@ -1298,7 +1392,7 @@
     } else {
       // Missed: the same potion comes back a few turns later.
       item.misses += 1;
-      session.queue.splice(Math.min(3, session.queue.length), 0, item);
+      requeue(item, RETRY_GAP, true);
     }
     saveState();
     return info;
@@ -1456,11 +1550,15 @@
     if (speech.status === 'missing') {
       node.textContent = 'This browser cannot read words aloud, so each spell flashes on screen for a moment instead.';
     } else if (speech.status === 'novoices') {
-      node.textContent = 'No voice was found on this device yet. Spells flash on screen for a moment instead.';
+      node.textContent = 'No voice that works on this device alone was found, so each spell flashes on screen ' +
+        'for a moment instead. Online voices are never used.';
+    } else if (speech.status === 'failed') {
+      node.textContent = 'The voice did not work just now, so spells can be peeked at on screen. ' +
+        'Tap “Test the voice” to try it again.';
     } else {
       const voice = speech.voice || speech.pickVoice();
       node.textContent = voice
-        ? `Voice: ${voice.name} (${voice.lang}). Turn the volume up so the spells can be heard.`
+        ? `Voice: ${voice.name} (${voice.lang}), spoken on this device. Turn the volume up so the spells can be heard.`
         : 'The voice wakes up when Start is tapped. Turn the volume up so the spells can be heard.';
     }
   }
@@ -1496,7 +1594,7 @@
     state.math.level = level;
     saveState();
     renderParentMath(level === 'easy'
-      ? 'Easy: adding and taking away within 20, small numbers everywhere.'
+      ? 'Easy: every number stays within 20, and clocks show whole hours.'
       : 'Within 100: two-digit numbers, half hours and bigger coins.');
   }
 
@@ -1510,6 +1608,11 @@
     state.math.topics[id] = !state.math.topics[id];
     saveState();
     renderParentMath(`${topic.name}: ${state.math.topics[id] ? 'on' : 'off'}.`);
+  }
+
+  // Shown for as long as the browser refuses to keep the save.
+  function renderSaveNote() {
+    $('#save-note').hidden = storageOk;
   }
 
   function renderParent() {
@@ -1540,20 +1643,22 @@
     }
     state.words = words;
     state.custom = true;
-    saveState();
+    const kept = saveState();
     wordInput.value = words.join('\n');
     wordInput.blur();
     const note = skipped.length ? ` Skipped: ${skipped.slice(0, 8).join(', ')}.` : '';
-    renderParentWords(`Saved ${plural(words.length, 'word')}. The next round will use them.${note}`);
+    renderParentWords(kept
+      ? `Saved ${plural(words.length, 'word')}. The next round will use them.${note}`
+      : `${plural(words.length, 'word')} ready for this visit only — this device could not save the list.${note}`);
   }
 
   function useStarter() {
     state.words = DATA.starterWords.slice();
     state.custom = false;
-    saveState();
+    const kept = saveState();
     wordInput.value = state.words.join('\n');
     wordInput.blur();
-    renderParentWords(`Starter list is ready (${plural(state.words.length, 'word')}).`);
+    renderParentWords(`Starter list is ready (${plural(state.words.length, 'word')})${kept ? '' : ', for this visit only'}.`);
   }
 
   function resetProgress() {
@@ -1563,7 +1668,7 @@
       btn.textContent = 'Tap again to erase everything';
       return;
     }
-    state.progress = {};
+    state.progress = Object.create(null);
     state.math.brewed = 0;
     state.stars = 0;
     state.robe = DATA.robes[0].id;
@@ -1686,61 +1791,25 @@
     if (btn) toggleMathTopic(btn.dataset.topic);
   });
 
-  // A real keyboard (grown-up on a laptop) can play too. No text field is ever focused.
-  document.addEventListener('keydown', (event) => {
-    if (event.metaKey || event.ctrlKey || event.altKey) return;
-    if (activeScreen !== 'play' && activeScreen !== 'brew') return;
-    if (!resultBox.hidden) {
-      if (event.key === 'Enter') {
-        event.preventDefault();
-        onNext();
-      }
-      return;
-    }
-    if (activeScreen === 'brew') {
-      if (!brew) return;
-      if (event.key === 'Backspace') {
-        event.preventDefault();
-        brewUndo();
-      } else if (event.key === 'Enter') {
-        event.preventDefault();
-        brewPotion();
-      } else if (/^[0-9]$/.test(event.key)) {
-        tapDigit(event.key);
-      }
-      return;
-    }
-    if (!turn) return;
-    const key = event.key.toLowerCase();
-    if (event.key === 'Backspace') {
-      event.preventDefault();
-      undo();
-    } else if (event.key === 'Enter') {
-      event.preventDefault();
-      cast();
-    } else if (key.length === 1 && /[a-z']/.test(key)) {
-      const index = turn.tiles.findIndex((tile) => tile.ch === key && !tile.used);
-      if (index >= 0) tapTile(index);
-    }
-  });
-
   // Keep iPad Safari from pinch-zooming while little fingers tap fast.
   document.addEventListener('gesturestart', (event) => event.preventDefault());
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) speech.hush();
   });
+  window.addEventListener('resize', fitModel); // turning the iPad changes the card's width
 
   if (speech.status !== 'missing') {
     speech.pickVoice();
+    speech.scheduleCheck(); // voices can take a moment to load; after that, none means none
     try {
       window.speechSynthesis.addEventListener('voiceschanged', () => {
-        speech.pickVoice();
-        if (speech.voices().length && speech.status === 'novoices') speech.checkVoices();
+        speech.checkVoices();
         renderVoiceStatus();
       });
     } catch (err) { /* older Safari: voices are ready right away */ }
   }
 
+  renderSaveNote();
   renderCasters();
   onSpeechChange();
   show('home');

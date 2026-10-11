@@ -51,17 +51,20 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // ---------------------------------------------------------------- browser setup
 
 // Replaces speechSynthesis with a recorder, so we can see what the game says.
-function speechStub() {
+//   setup.voices – [name, lang, localService] for each voice the device offers
+//   setup.error  – every utterance fails with this error code instead of speaking
+//                  (a test can change it later through window.__speechError)
+function speechStub(setup) {
   const spoken = [];
-  const voice = (name, lang) => ({ name, lang, voiceURI: name, localService: true, default: false });
-  const voices = [
-    voice('Albert', 'en-US'),
-    voice('Daniel', 'en-GB'),
-    voice('Thomas', 'fr-FR'),
-    voice('Samantha', 'en-US'),
-    voice('Fred', 'en-US'),
-  ];
+  const voices = (setup.voices || [
+    ['Albert', 'en-US', true],
+    ['Daniel', 'en-GB', true],
+    ['Thomas', 'fr-FR', true],
+    ['Samantha', 'en-US', true],
+    ['Fred', 'en-US', true],
+  ]).map(([name, lang, localService]) => ({ name, lang, voiceURI: name, localService, default: false }));
   window.__spoken = spoken;
+  window.__speechError = setup.error || null;
   window.SpeechSynthesisUtterance = class {
     constructor(text) {
       this.text = text;
@@ -83,8 +86,17 @@ function speechStub() {
         rate: utterance.rate,
         lang: utterance.lang,
         voice: utterance.voice ? utterance.voice.name : null,
+        local: utterance.voice ? utterance.voice.localService : null,
       });
-      setTimeout(() => utterance.onend && utterance.onend({}), 30);
+      const error = window.__speechError;
+      setTimeout(() => {
+        if (error) {
+          if (utterance.onerror) utterance.onerror({ error: error === 'no-code' ? undefined : error });
+          return;
+        }
+        if (utterance.onstart) utterance.onstart({});
+        setTimeout(() => utterance.onend && utterance.onend({}), 20);
+      }, 10);
     },
     cancel() {},
     pause() {},
@@ -103,6 +115,25 @@ function removeSpeech() {
   try { delete window.SpeechSynthesisUtterance; } catch (err) { /* ignore */ }
 }
 
+// Every localStorage write fails, the way a full disk or private browsing does.
+// A test can let writes through again with window.__storageFull = false.
+function fullStorage() {
+  const write = Storage.prototype.setItem;
+  window.__storageFull = true;
+  Storage.prototype.setItem = function setItem(...args) {
+    if (window.__storageFull) throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+    return write.apply(this, args);
+  };
+}
+
+// The browser refuses to hand over localStorage at all.
+function blockedStorage() {
+  Object.defineProperty(window, 'localStorage', {
+    configurable: true,
+    get() { throw new DOMException('Access is denied for this document.', 'SecurityError'); },
+  });
+}
+
 async function launchBrowser() {
   for (const [name, type] of [['webkit', webkit], ['chromium', chromium]]) {
     try {
@@ -115,20 +146,26 @@ async function launchBrowser() {
   throw new Error('No Playwright browser could be launched. Run: npx playwright install chromium');
 }
 
-async function openPage(browser, baseUrl, size, { speech = 'stub', saved = null, reducedMotion = 'no-preference' } = {}) {
+// speech:  'stub' (five on-device voices), { voices, error } for a stub set up another way,
+//          'none' (no speech API) or 'real' (the browser's own engine, untouched)
+// storage: 'full' or 'blocked' to make saving fail
+async function openPage(browser, baseUrl, size, { speech = 'stub', saved = null, reducedMotion = 'no-preference', storage = null } = {}) {
   const context = await browser.newContext({
     viewport: { width: size.width, height: size.height },
     deviceScaleFactor: 1,
     hasTouch: true,
     reducedMotion,
   });
-  if (speech === 'stub') await context.addInitScript(speechStub);
-  if (speech === 'none') await context.addInitScript(removeSpeech);
+  if (speech === 'stub') await context.addInitScript(speechStub, {});
+  else if (speech === 'none') await context.addInitScript(removeSpeech);
+  else if (speech !== 'real') await context.addInitScript(speechStub, speech);
   if (saved) {
     await context.addInitScript(([key, value]) => {
       if (!window.localStorage.getItem(key)) window.localStorage.setItem(key, value);
     }, [STORE_KEY, JSON.stringify(saved)]);
   }
+  if (storage === 'full') await context.addInitScript(fullStorage);
+  if (storage === 'blocked') await context.addInitScript(blockedStorage);
   const page = await context.newPage();
   const problems = [];
   const requests = [];
@@ -270,6 +307,36 @@ async function checkPlayLayout(page, label, root = '#screen-play', rowNames = SP
   }, { minTap: MIN_TAP, root, rowNames });
   check(report.length === 0, `${label}: play screen layout is tidy`, report.slice(0, 4).join('; '));
 }
+
+// The word being shown (to copy, or flashed when there is no voice) must sit
+// inside its card: the box and every single letter, in one row.
+async function checkModelFits(page, label, word) {
+  const report = await page.evaluate((word) => {
+    const problems = [];
+    const model = document.querySelector('#model');
+    if (model.hidden) return ['the word is not showing'];
+    if (model.textContent !== word) problems.push(`it shows "${model.textContent}"`);
+    const card = model.closest('.prompt-card').getBoundingClientRect();
+    const inside = (node, name) => {
+      const box = node.getBoundingClientRect();
+      if (box.left < card.left - 0.5 || box.right > card.right + 0.5 || box.top < card.top - 0.5 || box.bottom > card.bottom + 0.5) {
+        problems.push(`${name} spills out of the card (x ${Math.round(box.left)}–${Math.round(box.right)}, card ${Math.round(card.left)}–${Math.round(card.right)})`);
+      }
+      if (box.left < 0 || box.right > window.innerWidth || box.bottom > window.innerHeight) problems.push(`${name} is off screen`);
+    };
+    inside(model, 'the word');
+    [...model.children].forEach((letter, i) => inside(letter, `letter ${i + 1}`));
+    if (new Set([...model.children].map((letter) => Math.round(letter.getBoundingClientRect().top))).size > 1) problems.push('the word breaks onto two lines');
+    const size = parseFloat(getComputedStyle(model).fontSize);
+    if (size < 24) problems.push(`the letters are only ${size}px`);
+    return [...new Set(problems)];
+  }, word);
+  check(report.length === 0, `${label}: the whole word "${word}" fits inside its card`, report.slice(0, 3).join('; '));
+}
+
+// Which listen buttons can be tapped right now, e.g. "btn-hear btn-peek".
+const listenButtons = (page) => page.evaluate(() => [...document.querySelectorAll('#listen-row button')]
+  .filter((node) => node.offsetParent !== null).map((node) => node.id).join(' '));
 
 // ---------------------------------------------------------------- playing
 
@@ -420,7 +487,7 @@ async function fullGame(browser, browserName, baseUrl, size) {
     }
     if (missedAt.has(word)) {
       const gap = turnNo - missedAt.get(word) - 1;
-      check(gap >= 2, `${tag}: a missed word is re-queued a few turns later`, `"${word}" came back after ${gap} other turn(s)`);
+      check(gap >= 2 && gap <= 4, `${tag}: a missed word is re-queued a few turns later`, `"${word}" came back after ${gap} other turn(s)`);
       if (step === 2) dropVerified = true;
       if (step === 1) floorVerified = true;
       missedAt.delete(word);
@@ -638,6 +705,7 @@ async function tightLayouts(browser, baseUrl) {
       await tapLetters(page, planTaps(turn, false));
       await sleep(300);
       await checkPlayLayout(page, `${size.name} (${item.label})`);
+      if (item.step === 1) await checkModelFits(page, `${size.name} (${item.label})`, item.word);
       if (TIGHT_SIZES.includes(size)) await shot(page, `09-tight-${size.name}-step${item.step}`);
       const kind = await castAndSeeResult(page);
       check(kind === (item.step === 4 ? 'mastered' : 'success'), `${size.name}: ${item.label} can be solved`, kind);
@@ -665,14 +733,14 @@ async function withoutSpeech(browser, baseUrl) {
   await tap(page, '#btn-spells');
   await page.waitForSelector('#screen-play:not([hidden])');
   check(await isShowing(page, '#screen-play [data-speech-note]'), 'no speech: play screen shows a friendly note');
-  check(!(await isShowing(page, '#btn-hear')), 'no speech: the Hear button is hidden');
-  check(await isShowing(page, '#btn-peek'), 'no speech: a Peek button is offered instead');
+  check(!(await isShowing(page, '#btn-hear')) && !(await isShowing(page, '#btn-slow')), 'no speech: the Hear and Slowly buttons are hidden');
   let turn = await readTurn(page, ['magic']);
   check(turn.model === 'magic', 'no speech: the word flashes at the start of the turn', String(turn.model));
   await sleep(300);
   await shot(page, '10-no-speech-peek-portrait');
   await page.waitForSelector('#model', { state: 'hidden', timeout: 5000 });
   check(true, 'no speech: the flashed word hides again');
+  check(await isShowing(page, '#btn-peek'), 'no speech: a Peek button is offered instead');
   await tap(page, '#btn-peek');
   turn = await readTurn(page, ['magic']);
   check(turn.model === 'magic', 'no speech: Peek shows the word again');
@@ -692,8 +760,10 @@ async function withoutSpeech(browser, baseUrl) {
   await tap(real.page, '#btn-spells');
   await real.page.waitForSelector('#screen-play:not([hidden])');
   await sleep(1700);
-  const voices = await real.page.evaluate(() => ('speechSynthesis' in window && window.speechSynthesis ? window.speechSynthesis.getVoices().length : -1));
+  const voices = await real.page.evaluate(() => ('speechSynthesis' in window && window.speechSynthesis
+    ? window.speechSynthesis.getVoices().filter((voice) => voice.localService === true && /^en/i.test(voice.lang)).length : -1));
   if (voices <= 0) {
+    await real.page.waitForSelector('#model', { state: 'hidden', timeout: 5000 }); // the flashed word takes the buttons' place
     check(await isShowing(real.page, '#btn-peek'), 'no voices: Peek is offered when the device has no voice');
   } else {
     check(await isShowing(real.page, '#btn-hear'), 'real voices: Hear button is offered');
@@ -909,6 +979,8 @@ async function potionRecipes(browser, baseUrl) {
       levels: P.levels,
       topics: P.topics,
       samples,
+      easySkip: Array.from({ length: 3000 }, () => P.makeProblem('skip', 'easy')),
+      roundsEasySkip: rounds({ level: 'easy', topics: only(['skip']) }),
       roundsAll: rounds({ level: 'hundred', topics: only(everything) }),
       roundsSub: rounds({ level: 'easy', topics: only(['sub']) }),
       roundsTime: rounds({ level: 'easy', topics: only(['time']) }),
@@ -972,8 +1044,10 @@ async function potionRecipes(browser, baseUrl) {
         const step = want.numbers[1] - want.numbers[0];
         const blank = show.items.indexOf(null);
         if (![2, 5, 10].includes(step)) note(problem, `counts by ${step}`);
-        if (show.items.length !== 5 || show.items.filter((n) => n === null).length !== 1 || blank < 2) note(problem, 'needs one blank after two numbers');
-        if (easy && (blank !== 4 || want.numbers[0] % step !== 0 || (step === 2 && want.numbers[4] > 20))) note(problem, 'easy skip counting should start low and ask what is next');
+        const count = show.items.length;
+        if (count > 5 || count < (easy ? 3 : 5) || show.items.filter((n) => n === null).length !== 1 || blank < 2) note(problem, 'needs one blank after two numbers');
+        if (easy && (blank !== count - 1 || want.numbers[0] % step !== 0)) note(problem, 'easy skip counting should start on a step and ask what is next');
+        if (easy && want.numbers.some((n) => n > 20)) note(problem, 'easy level must stay within 20');
         if (!problem.title.includes(`${step}s`) || !problem.say.includes('blank')) note(problem, 'does not say what to count by');
       }
       if (topic === 'story') {
@@ -1020,6 +1094,26 @@ async function potionRecipes(browser, baseUrl) {
   for (const step of [2, 5, 10]) {
     check(hundred('skip').some((p) => p.title === `Count by ${step}s`), `recipes: skip counting by ${step}s`);
   }
+
+  // Easy means within 20 for skip counting too, whatever it counts by (3,000 more problems).
+  const counted = (problem) => problem.show.items.map((n) => (n === null ? Number(problem.answer) : n));
+  for (const step of [2, 5, 10]) {
+    const list = data.easySkip.filter((p) => p.title === `Count by ${step}s`);
+    const over = list.filter((p) => counted(p).some((n) => !Number.isInteger(n) || n < 0 || n > 20));
+    const top = Math.max(...list.map((p) => Math.max(...counted(p))));
+    check(list.length >= 100, `recipes: easy skip counting includes counting by ${step}s`, `${list.length} of ${data.easySkip.length}`);
+    check(over.length === 0, `recipes: easy skip counting by ${step}s never goes past 20`,
+      `${over.length} of ${list.length} do, such as ${over.slice(0, 2).map((p) => counted(p).join(', ')).join(' | ')}`);
+    check(top === 20, `recipes: easy skip counting by ${step}s reaches 20`, String(top));
+    check(list.every((p) => counted(p).every((n, i, all) => !i || n - all[i - 1] === step) && Number(p.answer) === counted(p)[counted(p).length - 1]),
+      `recipes: easy skip counting by ${step}s counts evenly and asks for the next number`);
+  }
+  check(data.easySkip.filter((p) => p.title === 'Count by 10s').every((p) => counted(p).join(', ') === '0, 10, 20'),
+    'recipes: easy counting by 10s is the short row 0, 10, ?');
+  check(new Set(data.easySkip.map((p) => p.key)).size >= 20, 'recipes: easy skip counting still has plenty of different rows',
+    String(new Set(data.easySkip.map((p) => p.key)).size));
+  check(data.roundsEasySkip.every((round) => round.length === 8 && new Set(round.map((p) => p.key)).size === 8),
+    'recipes: easy skip counting alone still fills a round without repeats');
 
   // Rounds: the right size, spread over the chosen topics, no repeats.
   const roundOk = (round, topics) => round.length === 8 && round.every((p) => topics.includes(p.topic)) &&
@@ -1488,22 +1582,736 @@ async function potionsQuiet(browser, baseUrl) {
   await tapNext(calm.page);
   check(calm.problems.length === 0, 'potions with reduced motion: no console errors', calm.problems.slice(0, 3).join(' | '));
   await calm.context.close();
+}
 
-  // A grown-up on a laptop can type the numbers; still no text field anywhere.
-  const keys = await openPage(browser, baseUrl, SIZES[1]);
-  await tap(keys.page, '#btn-potions');
-  await keys.page.waitForSelector('#screen-brew:not([hidden])');
-  const first = await readBrew(keys.page);
-  const want = solveBrew(first);
-  await keys.page.keyboard.press('9');
-  await keys.page.keyboard.press('Backspace');
-  for (const digit of want.digits) await keys.page.keyboard.press(digit);
-  check((await readBrew(keys.page)).slots.filter((ch) => ch).join('') === want.digits, 'potions with a keyboard: number keys and Backspace work');
-  await keys.page.keyboard.press('Enter');
-  await keys.page.waitForSelector('#result:not([hidden])');
-  check((await keys.page.getAttribute('#result', 'data-kind')) === 'brewed', 'potions with a keyboard: Enter brews the potion');
-  check(keys.problems.length === 0, 'potions with a keyboard: no console errors', keys.problems.slice(0, 3).join(' | '));
-  await keys.context.close();
+// ---------------------------------------------------------------- review fix 1: only on-device voices
+
+const WORD_AT_STEP_4 = { words: ['magic'], custom: true, progress: { magic: { step: 4, mastered: 0, best: 0, last: 0 } } };
+
+// The reviewer's case: a plain on-device voice next to "better" remote ones.
+const VOICES_MIXED = [
+  ['Google US English', 'en-US', false],
+  ['Daniel', 'en-GB', true],
+  ['Samantha', 'en-US', false],
+  ['Ava (Premium)', 'en-US', null], // does not say where it lives, so it is not trusted
+];
+const VOICES_REMOTE = [
+  ['Google US English', 'en-US', false],
+  ['Samantha', 'en-US', false],
+  ['Ava (Premium)', 'en-US', null],
+];
+
+async function localVoicesOnly(browser, browserName, baseUrl) {
+  const openParent = async (page) => {
+    await hold(page, browserName, '#btn-parent', 2300);
+    await page.waitForSelector('#screen-parent:not([hidden])', { timeout: 3000 });
+  };
+
+  // ---- an on-device voice next to remote ones: it does all the talking
+  let tag = 'mixed voices';
+  const mixed = await openPage(browser, baseUrl, SIZES[0], { speech: { voices: VOICES_MIXED }, saved: WORD_AT_STEP_4, reducedMotion: 'reduce' });
+  let page = mixed.page;
+  await sleep(1400); // past the voice check
+  check(!(await isShowing(page, '#screen-home [data-speech-note]')), `${tag}: no "no voice" note, there is a voice on the device`);
+  await tap(page, '#btn-spells');
+  await page.waitForSelector('#screen-play:not([hidden])');
+  let spoken = await spokenList(page);
+  check(spoken.length === 2 && spoken[1].text === 'magic', `${tag}: the greeting and the spelling word are spoken`, spoken.map((s) => s.text).join(' | '));
+  check(await listenButtons(page) === 'btn-hear btn-slow', `${tag}: the Hear buttons are offered, not Peek`, await listenButtons(page));
+  await tap(page, '#btn-hear');
+  await tap(page, '#btn-slow');
+  let result = await playTurn(page, ['magic']);
+  check(result.kind === 'mastered', `${tag}: the word can be spelled from sound`, result.kind);
+  await tapNext(page);
+  await page.waitForSelector('#screen-done:not([hidden])');
+  await tap(page, '#btn-done-home');
+  await tap(page, '#btn-book');
+  await tap(page, '.book-word[data-word="magic"]');
+  await tap(page, '#screen-book [data-go="home"]');
+  await tap(page, '#btn-potions');
+  await page.waitForSelector('#screen-brew:not([hidden])');
+  await tap(page, '#btn-brew-hear');
+  await tap(page, '#btn-brew-quit');
+  await openParent(page);
+  const voiceLine = await page.locator('#voice-status').innerText();
+  check(/Daniel/.test(voiceLine) && /on this device/.test(voiceLine), `${tag}: the grown-up sees which on-device voice is used`, voiceLine);
+  await page.locator('#btn-test-voice').evaluate((node) => node.scrollIntoView({ block: 'center' }));
+  await tap(page, '#btn-test-voice');
+  spoken = await spokenList(page);
+  check(spoken.length >= 9, `${tag}: greetings, words, results, problems and the voice test were all spoken`, `${spoken.length} utterances`);
+  const strays = spoken.filter((s) => s.voice !== 'Daniel' || s.local !== true);
+  check(strays.length === 0, `${tag}: every utterance uses the on-device voice, never a remote or unnamed one`,
+    strays.slice(0, 3).map((s) => `"${s.text}" by ${s.voice}`).join(' | '));
+  check(spoken.every((s) => s.lang === 'en-GB'), `${tag}: the language follows the chosen voice`, [...new Set(spoken.map((s) => s.lang))].join(','));
+  check(mixed.problems.length === 0, `${tag}: no console errors`, mixed.problems.slice(0, 3).join(' | '));
+  await mixed.context.close();
+
+  // ---- no on-device voice at all: nothing is spoken, the word is shown instead
+  for (const [name, voices] of [['remote voices only', VOICES_REMOTE], ['an empty voice list', []]]) {
+    tag = name;
+    const quiet = await openPage(browser, baseUrl, SIZES[0], { speech: { voices }, saved: WORD_AT_STEP_4, reducedMotion: 'reduce' });
+    page = quiet.page;
+    await page.waitForSelector('#screen-home [data-speech-note]:not([hidden])', { timeout: 3000 }).catch(() => {});
+    check(await isShowing(page, '#screen-home [data-speech-note]'), `${tag}: the home screen shows the friendly note`);
+    await tap(page, '#btn-spells');
+    await page.waitForSelector('#screen-play:not([hidden])');
+    const turn = await readTurn(page, ['magic']);
+    check(turn.step === 4 && turn.model === 'magic', `${tag}: the word is flashed on screen instead`, `step ${turn.step}, model ${turn.model}`);
+    check(await isShowing(page, '#screen-play [data-speech-note]'), `${tag}: the play screen shows the friendly note`);
+    await page.waitForSelector('#model', { state: 'hidden', timeout: 5000 });
+    check(await listenButtons(page) === 'btn-peek', `${tag}: only Peek is offered, no listening buttons that cannot work`, await listenButtons(page));
+    await tap(page, '#btn-peek');
+    check((await readTurn(page, ['magic'])).model === 'magic', `${tag}: Peek shows the word again`);
+    result = await playTurn(page, ['magic']);
+    check(result.kind === 'mastered', `${tag}: the word can still be mastered`, result.kind);
+    await tapNext(page);
+    await page.waitForSelector('#screen-done:not([hidden])');
+    await tap(page, '#btn-done-home');
+    await tap(page, '#btn-book');
+    await tap(page, '.book-word[data-word="magic"]');
+    await tap(page, '#screen-book [data-go="home"]');
+    await tap(page, '#btn-potions');
+    await page.waitForSelector('#screen-brew:not([hidden])');
+    check(await isShowing(page, '#screen-brew [data-speech-note]') && !(await isShowing(page, '#btn-brew-hear')),
+      `${tag}: Potions shows its note instead of the Hear buttons`);
+    const seen = await readBrew(page);
+    await tapDigits(page, solveBrew(seen).digits);
+    check((await brewAndSeeResult(page)) === 'brewed', `${tag}: a potion can still be brewed`);
+    await tapNext(page);
+    await tap(page, '#btn-brew-quit');
+    await openParent(page);
+    const line = await page.locator('#voice-status').innerText();
+    check(/flash/.test(line) && /never used/.test(line), `${tag}: the grown-up is told why there is no voice`, line);
+    await page.locator('#btn-test-voice').evaluate((node) => node.scrollIntoView({ block: 'center' }));
+    await tap(page, '#btn-test-voice');
+    await sleep(200);
+    spoken = await spokenList(page);
+    check(spoken.length === 0, `${tag}: speechSynthesis.speak is never called, not even without a voice chosen`,
+      spoken.slice(0, 3).map((s) => `"${s.text}" by ${s.voice}`).join(' | '));
+    check(quiet.problems.length === 0, `${tag}: no console errors`, quiet.problems.slice(0, 3).join(' | '));
+    await quiet.context.close();
+  }
+
+  // ---- a device whose voices arrive late: quiet until an on-device one shows up
+  tag = 'voices that arrive late';
+  const late = await openPage(browser, baseUrl, SIZES[0], { speech: { voices: [] }, saved: WORD_AT_STEP_4, reducedMotion: 'reduce' });
+  page = late.page;
+  await tap(page, '#btn-spells');
+  await page.waitForSelector('#screen-play:not([hidden])');
+  await page.waitForSelector('#model', { state: 'hidden', timeout: 5000 });
+  await page.evaluate((list) => {
+    const voices = window.speechSynthesis.getVoices();
+    for (const [name, lang, localService] of list) voices.push({ name, lang, voiceURI: name, localService, default: false });
+  }, VOICES_MIXED);
+  await tap(page, '#btn-peek'); // any tap; the game looks again when it next wants to speak
+  await tap(page, '#btn-quit');
+  await tap(page, '#btn-spells');
+  await page.waitForSelector('#screen-play:not([hidden])');
+  spoken = await spokenList(page);
+  check(spoken.length === 2 && spoken.every((s) => s.voice === 'Daniel' && s.local === true), `${tag}: the on-device voice is used once it is there`,
+    spoken.map((s) => `"${s.text}" by ${s.voice}`).join(' | '));
+  check(await listenButtons(page) === 'btn-hear btn-slow' && !(await isShowing(page, '#screen-play [data-speech-note]')),
+    `${tag}: the Hear buttons come back and the note goes away`, await listenButtons(page));
+  check(late.problems.length === 0, `${tag}: no console errors`, late.problems.slice(0, 3).join(' | '));
+  await late.context.close();
+}
+
+// ---------------------------------------------------------------- review fix 2: a voice that fails
+
+async function speechFailures(browser, baseUrl) {
+  const size = SIZES[0];
+
+  // Each of these means "nothing was heard". 'no-code' is an error event without a code (older Safari).
+  const broken = ['not-allowed', 'audio-busy', 'audio-hardware', 'network', 'synthesis-failed', 'voice-unavailable', 'no-code'];
+  await Promise.all(broken.map(async (error) => {
+    const tag = `speech error "${error}"`;
+    const { context, page, problems } = await openPage(browser, baseUrl, size, { speech: { error }, saved: WORD_AT_STEP_4, reducedMotion: 'reduce' });
+    await tap(page, '#btn-spells');
+    await page.waitForSelector('#screen-play:not([hidden])');
+    const flashed = await page.waitForSelector('#model.is-peek', { state: 'visible', timeout: 3000 }).then(() => true, () => false);
+    check(flashed && (await readTurn(page, ['magic'])).model === 'magic', `${tag}: the word is flashed when the voice fails`);
+    check(await isShowing(page, '#screen-play [data-speech-note]'), `${tag}: the friendly note is shown`);
+    await page.waitForSelector('#model', { state: 'hidden', timeout: 5000 });
+    check(await listenButtons(page) === 'btn-hear btn-peek', `${tag}: Peek is offered, with Hear for another try`, await listenButtons(page));
+
+    // The voice is still listed, so the delayed voice check used to switch the fallback off again.
+    await sleep(1500);
+    check(await listenButtons(page) === 'btn-hear btn-peek' && await isShowing(page, '#screen-play [data-speech-note]'),
+      `${tag}: Peek and the note are still there after the voice check`, await listenButtons(page));
+    await tap(page, '#btn-peek');
+    check((await readTurn(page, ['magic'])).model === 'magic', `${tag}: Peek shows the word`);
+    await page.waitForSelector('#model', { state: 'hidden', timeout: 5000 });
+
+    // Trying again and failing again changes nothing.
+    await tap(page, '#btn-hear');
+    await sleep(200);
+    check(await listenButtons(page) === 'btn-hear btn-peek', `${tag}: a retry that fails keeps Peek`, await listenButtons(page));
+
+    // Only a try that really speaks brings the normal buttons back.
+    await page.evaluate(() => { window.__speechError = null; });
+    await tap(page, '#btn-hear');
+    await page.waitForSelector('#btn-peek', { state: 'hidden', timeout: 3000 }).catch(() => {});
+    check(await listenButtons(page) === 'btn-hear btn-slow' && !(await isShowing(page, '#screen-play [data-speech-note]')),
+      `${tag}: a retry that works brings Hear and Slowly back`, await listenButtons(page));
+    check((await readTurn(page, ['magic'])).model === null, `${tag}: the word stays hidden once the voice works`);
+    const result = await playTurn(page, ['magic']);
+    check(result.kind === 'mastered', `${tag}: the word can be mastered`, result.kind);
+    check(problems.length === 0, `${tag}: no console errors`, problems.slice(0, 3).join(' | '));
+    await context.close();
+  }));
+
+  // A word cut short on purpose is not a broken voice: the answer must not be shown.
+  await Promise.all(['interrupted', 'canceled'].map(async (error) => {
+    const tag = `speech error "${error}"`;
+    const { context, page, problems } = await openPage(browser, baseUrl, size, { speech: { error }, saved: WORD_AT_STEP_4, reducedMotion: 'reduce' });
+    await page.evaluate(() => {
+      window.__modelShown = 0;
+      new MutationObserver(() => { if (!document.querySelector('#model').hidden) window.__modelShown += 1; })
+        .observe(document.querySelector('#model'), { attributes: true, childList: true });
+    });
+    await tap(page, '#btn-spells');
+    await page.waitForSelector('#screen-play:not([hidden])');
+    await tap(page, '#btn-hear');
+    await sleep(1600);
+    check(await listenButtons(page) === 'btn-hear btn-slow', `${tag}: the normal buttons stay`, await listenButtons(page));
+    check((await page.evaluate(() => window.__modelShown)) === 0, `${tag}: the word is never shown at the listening step`);
+    check(problems.length === 0, `${tag}: no console errors`, problems.slice(0, 3).join(' | '));
+    await context.close();
+  }));
+
+  // Potions: the recipe is always on screen, so the Hear buttons simply stay for another try.
+  const tag = 'speech error in Potions';
+  const { context, page, problems } = await openPage(browser, baseUrl, TIGHT_SIZES[3], { speech: { error: 'not-allowed' }, reducedMotion: 'reduce' });
+  await tap(page, '#btn-potions');
+  await page.waitForSelector('#screen-brew:not([hidden])');
+  await sleep(1500);
+  const hear = await isShowing(page, '#btn-brew-hear');
+  const note = await isShowing(page, '#screen-brew [data-speech-note]');
+  check(hear && !note, `${tag}: the Hear buttons stay for another try, without the note`, `hear ${hear}, note ${note}`);
+  await checkPlayLayout(page, tag, '#screen-brew', BREW_ROWS);
+  await checkBrewPicture(page, tag);
+  const seen = await readBrew(page);
+  await tapDigits(page, solveBrew(seen).digits);
+  check((await brewAndSeeResult(page)) === 'brewed', `${tag}: the potion can be brewed`);
+  await tapNext(page);
+  await tap(page, '#btn-brew-quit');
+  await page.waitForSelector('#screen-home:not([hidden])');
+  check(await isShowing(page, '#screen-home [data-speech-note]'), `${tag}: the home screen says there is no voice right now`);
+  check(problems.length === 0, `${tag}: no console errors`, problems.slice(0, 3).join(' | '));
+  await context.close();
+}
+
+// ---------------------------------------------------------------- review fix 3: a missed word comes back soon
+
+// The reviewer's case: five words, the first one missed, everything after it
+// right. It used to come back after twelve other turns.
+async function retryGap(browser, baseUrl) {
+  const tag = 'retry gap';
+  const words = ['cat', 'dog', 'sun', 'hat', 'run'];
+  const { context, page, problems } = await openPage(browser, baseUrl, SIZES[0], { saved: { words, custom: true, roundSize: 5 }, reducedMotion: 'reduce' });
+  await tap(page, '#btn-spells');
+  await page.waitForSelector('#screen-play:not([hidden])');
+
+  const order = [];
+  const unfinished = new Set(words);
+  const missedAt = new Map(); // word -> { turnNo, others } for a miss still waiting to come back
+  const gaps = [];
+  const expected = new Map();
+  let turnNo = 0;
+  let laterMiss = false;
+  while (!(await isShowing(page, '#screen-done'))) {
+    turnNo += 1;
+    if (turnNo > 45) throw new Error('The round never finished');
+    const turn = await readTurn(page, words);
+    order.push(turn.word);
+    if (missedAt.has(turn.word)) {
+      const { at, others } = missedAt.get(turn.word);
+      gaps.push({ word: turn.word, gap: turnNo - at - 1, others, step: turn.step, want: expected.get(turn.word) });
+      missedAt.delete(turn.word);
+    }
+    // Miss "cat" on its very first turn, and later the first word to reach step 3.
+    let miss = turnNo === 1;
+    if (!laterMiss && turn.step === 3 && unfinished.size >= 5 && !missedAt.size) { miss = true; laterMiss = true; }
+    await tapLetters(page, planTaps(turn, miss));
+    const kind = await castAndSeeResult(page);
+    if (miss) {
+      missedAt.set(turn.word, { at: turnNo, others: unfinished.size - 1 });
+      expected.set(turn.word, Math.max(1, turn.step - 1));
+    }
+    if (kind === 'mastered') unfinished.delete(turn.word);
+    await tapNext(page);
+  }
+
+  check(order.slice(0, 5).join(' ') === 'cat dog sun hat cat', `${tag}: a word missed on turn 1 is back on turn 5`, order.slice(0, 14).join(' '));
+  check(gaps.length === 2, `${tag}: both missed words came back`, JSON.stringify(gaps));
+  for (const { word, gap, others, step, want } of gaps) {
+    check(others >= 4, `${tag}: "${word}" was missed with at least four other unfinished words`, String(others));
+    check(gap === 3, `${tag}: "${word}" came back after exactly three other turns, however well they went`, `${gap} other turn(s)`);
+    check(step === want, `${tag}: "${word}" came back one step lower`, `step ${step}, expected ${want}`);
+  }
+  check(unfinished.size === 0 && new Set(order).size === 5, `${tag}: every word still gets its turn and is mastered`, [...unfinished].join(','));
+  check(turnNo === 23, `${tag}: five words, four steps each, plus the turns the two misses cost is 23 turns`, String(turnNo));
+  check(problems.length === 0, `${tag}: no console errors`, problems.slice(0, 3).join(' | '));
+  await context.close();
+}
+
+// ---------------------------------------------------------------- review fix 4: the word "constructor"
+
+// "constructor" is an ordinary 11-letter word, and also the name of something
+// every JavaScript object carries. It must climb the ladder like any other word.
+async function constructorWord(browser, browserName, baseUrl) {
+  const tag = 'the word "constructor"';
+  const word = 'constructor';
+  const titles = { 1: 'Copy the spell', 2: 'Fill in the missing letters', 3: 'Unmix the letters', 4: 'Listen and spell' };
+  const { context, page, problems } = await openPage(browser, baseUrl, SIZES[1], { reducedMotion: 'reduce' });
+  const openParent = async () => {
+    await hold(page, browserName, '#btn-parent', 2300);
+    await page.waitForSelector('#screen-parent:not([hidden])', { timeout: 3000 });
+  };
+  // Looks the record up the safe way: `saved.progress.constructor` alone would find Object itself.
+  const record = () => page.evaluate(([key, w]) => {
+    const saved = JSON.parse(window.localStorage.getItem(key) || 'null');
+    const own = !!saved && Object.prototype.hasOwnProperty.call(saved.progress, w);
+    return { own, stars: saved ? saved.stars : null, ...(own ? saved.progress[w] : {}) };
+  }, [STORE_KEY, word]);
+
+  // ---- a grown-up types it in
+  await openParent();
+  await page.locator('#word-input').fill('Constructor');
+  await tap(page, '#btn-save-words');
+  check(/Saved 1 word/.test(await page.locator('#parent-message').innerText()), `${tag}: is accepted as a spelling word`);
+  await tap(page, '#screen-parent .parent-buttons-end [data-go="home"]');
+  check((await page.locator('#spells-status').innerText()) === '0 of 1 word mastered', `${tag}: starts out not mastered`,
+    await page.locator('#spells-status').innerText());
+
+  // ---- it climbs all four steps
+  await tap(page, '#btn-spells');
+  await page.waitForSelector('#screen-play:not([hidden])');
+  for (const step of [1, 2, 3, 4]) {
+    const turn = await readTurn(page, [word]);
+    check(turn.step === step && turn.title === titles[step], `${tag}: turn ${step} is step ${step}, "${titles[step]}"`, `step ${turn.step}, "${turn.title}"`);
+    if (step === 1) await checkModelFits(page, tag, word);
+    await tapLetters(page, planTaps(turn, false));
+    const kind = await castAndSeeResult(page);
+    check(kind === (step === 4 ? 'mastered' : 'success'), `${tag}: a right spelling at step ${step} moves it up`, kind);
+    if (step < 4) check((await record()).step === step + 1, `${tag}: step ${step + 1} is saved`, JSON.stringify(await record()));
+    await tapNext(page);
+  }
+  await page.waitForSelector('#screen-done:not([hidden])', { timeout: 3000 });
+  let saved = await record();
+  check(saved.own && saved.mastered === 1 && saved.best === 3 && saved.stars === 3, `${tag}: is mastered with three stars, and saved`, JSON.stringify(saved));
+
+  // ---- and it is still mastered after a reload
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForSelector('#screen-home:not([hidden])');
+  check((await page.locator('#spells-status').innerText()) === '1 of 1 word mastered', `${tag}: is still mastered after a reload`,
+    await page.locator('#spells-status').innerText());
+  await tap(page, '#btn-book');
+  check(/Mastered/.test(await page.locator('.book-word[data-word="constructor"] .book-note').innerText()), `${tag}: the spellbook shows it as mastered`);
+  await tap(page, '#screen-book [data-go="home"]');
+  await tap(page, '#btn-spells');
+  await page.waitForSelector('#screen-play:not([hidden])');
+  let turn = await readTurn(page, [word]);
+  check(turn.step === 3 && turn.title === titles[3], `${tag}: comes back for a quick review at step 3 after the reload`, `step ${turn.step}, "${turn.title}"`);
+  await tap(page, '#btn-quit');
+
+  // ---- reset wipes it like any other word
+  await openParent();
+  await page.locator('#btn-reset').evaluate((node) => node.scrollIntoView({ block: 'center' }));
+  await tap(page, '#btn-reset');
+  await tap(page, '#btn-reset');
+  saved = await record();
+  check(!saved.own && saved.stars === 0, `${tag}: reset clears its progress`, JSON.stringify(saved));
+  await tap(page, '#screen-parent .parent-buttons-end [data-go="home"]');
+  await tap(page, '#btn-spells');
+  await page.waitForSelector('#screen-play:not([hidden])');
+  turn = await readTurn(page, [word]);
+  check(turn.step === 1 && turn.title === titles[1], `${tag}: starts again at step 1 after a reset`, `step ${turn.step}, "${turn.title}"`);
+  const again = await playTurn(page, [word]);
+  check(again.kind === 'success' && (await record()).step === 2, `${tag}: climbs again after a reset`, again.kind);
+  check(problems.length === 0, `${tag}: no console errors`, problems.slice(0, 3).join(' | '));
+  await context.close();
+
+  // ---- a save from before the fix (no record for the word) loads cleanly
+  const old = await openPage(browser, baseUrl, SIZES[0], { saved: { words: [word], custom: true, progress: {} }, reducedMotion: 'reduce' });
+  await tap(old.page, '#btn-spells');
+  await old.page.waitForSelector('#screen-play:not([hidden])');
+  turn = await readTurn(old.page, [word]);
+  check(turn.step === 1 && turn.title === titles[1], `${tag}: an older save without a record starts at step 1`, `step ${turn.step}, "${turn.title}"`);
+  check(old.problems.length === 0, `${tag}: an older save causes no console errors`, old.problems.slice(0, 3).join(' | '));
+  await old.context.close();
+}
+
+// ---------------------------------------------------------------- review fix 5: no voice on a small iPad
+
+const NO_VOICE_MODES = [
+  { name: 'no speech at all', file: 'no-speech', speech: 'none', buttons: 'btn-peek' },
+  { name: 'an empty voice list', file: 'no-voices', speech: { voices: [] }, buttons: 'btn-peek' },
+  { name: 'a voice that fails', file: 'voice-fails', speech: { error: 'not-allowed' }, buttons: 'btn-hear btn-peek' },
+];
+
+// The card's own parts (ladder, title, flashed word, buttons, note) must stay inside it.
+async function checkCardHolds(page, label) {
+  const report = await page.evaluate(() => {
+    const problems = [];
+    const card = document.querySelector('#screen-play .prompt-card');
+    const box = card.getBoundingClientRect();
+    for (const node of card.children) {
+      if (node.offsetParent === null) continue;
+      const b = node.getBoundingClientRect();
+      const name = node.id || node.className;
+      if (b.left < box.left - 0.5 || b.right > box.right + 0.5 || b.top < box.top - 0.5 || b.bottom > box.bottom + 0.5) problems.push(`${name} spills out of the card`);
+    }
+    if (box.top < 0 || box.bottom > window.innerHeight || box.left < 0 || box.right > window.innerWidth) problems.push('the card is off screen');
+    const note = card.querySelector('.speech-note');
+    if (note.offsetParent !== null && parseFloat(getComputedStyle(note).fontSize) < 16) problems.push('the note is tiny');
+    return problems;
+  });
+  check(report.length === 0, `${label}: the card holds everything in it`, report.slice(0, 3).join('; '));
+}
+
+// Step 4 with an apostrophe word is the fullest screen there is (27 letter
+// tiles). Without a voice the card also holds Peek and the note, and for a
+// moment the flashed word. Checked at every iPad size, in every no-voice state.
+async function compactNoVoice(browser, baseUrl) {
+  const word = "couldn't";
+  const saved = { words: [word], custom: true, progress: { [word]: { step: 4, mastered: 0, best: 0, last: 0 } } };
+  for (const size of [...SIZES, ...TIGHT_SIZES]) {
+    await Promise.all(NO_VOICE_MODES.map(async (mode) => {
+      const tag = `${size.name}, ${mode.name}`;
+      const tight = TIGHT_SIZES.includes(size);
+      const { context, page, problems } = await openPage(browser, baseUrl, size, { speech: mode.speech, saved, reducedMotion: 'reduce' });
+
+      // ---- home, with its note
+      if (mode.buttons === 'btn-peek') {
+        await page.waitForSelector('#screen-home [data-speech-note]:not([hidden])', { timeout: 3000 }).catch(() => {});
+        const noteFits = await page.evaluate(() => {
+          const note = document.querySelector('#screen-home [data-speech-note]');
+          if (note.offsetParent === null) return false;
+          const box = note.getBoundingClientRect();
+          const links = document.querySelector('#screen-home .home-links').getBoundingClientRect();
+          return box.top >= links.bottom - 1 && box.bottom <= window.innerHeight && box.left >= 0 && box.right <= window.innerWidth;
+        });
+        check(noteFits, `${tag}: the home note is on screen, under the buttons`);
+        await checkHome(page, tag);
+        if (tight && mode.speech === 'none') await shot(page, `20-no-voice-${mode.file}-${size.name}-home`);
+      }
+
+      // ---- while the word is flashing
+      await tap(page, '#btn-spells');
+      await page.waitForSelector('#screen-play:not([hidden])');
+      const flashed = await page.waitForSelector('#model.is-peek', { state: 'visible', timeout: 3000 }).then(() => true, () => false);
+      check(flashed, `${tag}: the word is flashed`);
+      await checkPlayLayout(page, `${tag}, while the word flashes`);
+      await checkCardHolds(page, `${tag}, while the word flashes`);
+      await checkModelFits(page, `${tag}, while the word flashes`, word);
+      check(await listenButtons(page) === '', `${tag}: the flashed word takes the place of the buttons`, await listenButtons(page));
+      check(await isShowing(page, '#screen-play [data-speech-note]'), `${tag}: the note is shown`);
+      const tilesWhileFlashing = await page.locator('#tiles').boundingBox();
+      if (tight) await shot(page, `20-no-voice-${mode.file}-${size.name}-flash`);
+
+      // ---- after the flash
+      await page.waitForSelector('#model', { state: 'hidden', timeout: 5000 });
+      check(await listenButtons(page) === mode.buttons, `${tag}: only buttons that can do something are shown`, await listenButtons(page));
+      await checkPlayLayout(page, `${tag}, after the flash`);
+      await checkCardHolds(page, `${tag}, after the flash`);
+      const tilesAfter = await page.locator('#tiles').boundingBox();
+      check(Math.abs(tilesAfter.y - tilesWhileFlashing.y) < 1, `${tag}: the letter tiles do not move when the flash ends`,
+        `${tilesWhileFlashing.y} then ${tilesAfter.y}`);
+
+      // ---- with the whole word typed: Cast must be in reach
+      const turn = await readTurn(page, [word]);
+      await tapLetters(page, planTaps(turn, false));
+      await checkPlayLayout(page, `${tag}, with the word typed`);
+      const cast = await page.evaluate(() => {
+        const btn = document.querySelector('#btn-cast');
+        const box = btn.getBoundingClientRect();
+        const hit = document.elementFromPoint(box.left + box.width / 2, box.bottom - 3);
+        return { top: box.top, bottom: box.bottom, screen: window.innerHeight, ready: !btn.disabled, reachable: !!hit && btn.contains(hit) };
+      });
+      check(cast.ready && cast.reachable && cast.top >= 0 && cast.bottom <= cast.screen, `${tag}: all of the Cast button is on screen and can be tapped`,
+        `y ${Math.round(cast.top)}–${Math.round(cast.bottom)} of ${cast.screen}`);
+      if (tight) await shot(page, `20-no-voice-${mode.file}-${size.name}-typed`);
+      const kind = await castAndSeeResult(page);
+      check(kind === 'mastered', `${tag}: the word can be mastered`, kind);
+      check(problems.length === 0, `${tag}: no console errors`, problems.slice(0, 2).join(' | '));
+      await context.close();
+    }));
+  }
+}
+
+// ---------------------------------------------------------------- review fix 6: easy skip counting on screen
+
+async function easySkipRound(browser, baseUrl) {
+  const tag = 'easy skip counting';
+  const topics = Object.fromEntries(ALL_TOPICS.map((id) => [id, id === 'skip']));
+  const { context, page, problems } = await openPage(browser, baseUrl, SIZES[0], { saved: { math: { level: 'easy', topics, brewed: 0 } }, reducedMotion: 'reduce' });
+  await tap(page, '#btn-potions');
+  await page.waitForSelector('#screen-brew:not([hidden])');
+  const steps = new Set();
+  let turns = 0;
+  while (!(await isShowing(page, '#screen-done'))) {
+    turns += 1;
+    if (turns > 12) throw new Error('The easy skip counting round never finished');
+    const seen = await readBrew(page);
+    const want = solveBrew(seen);
+    const row = seen.sequence.join(', ');
+    steps.add(want.numbers[1] - want.numbers[0]);
+    check(seen.topic === 'skip' && seen.sequence.length >= 3 && seen.sequence.length <= 5, `${tag}: turn ${turns} is a short row of numbers`, row);
+    check(want.numbers.every((n) => n >= 0 && n <= 20), `${tag}: turn ${turns} stays within 20`, row);
+    check(seen.sequence.indexOf('?') === seen.sequence.length - 1, `${tag}: turn ${turns} asks what comes next`, row);
+    if (turns === 1) {
+      await checkPlayLayout(page, tag, '#screen-brew', BREW_ROWS);
+      await checkBrewPicture(page, tag);
+    }
+    await tapDigits(page, want.digits);
+    const kind = await brewAndSeeResult(page);
+    check(kind === 'brewed', `${tag}: turn ${turns} brews with the answer ${want.digits}`, kind);
+    await tapNext(page);
+  }
+  check(turns === 8, `${tag}: skip counting alone fills a round of 8`, String(turns));
+  check([...steps].every((step) => [2, 5, 10].includes(step)), `${tag}: counts by 2s, 5s or 10s`, [...steps].join(','));
+  check(problems.length === 0, `${tag}: no console errors`, problems.slice(0, 3).join(' | '));
+  await context.close();
+}
+
+// ---------------------------------------------------------------- review fix 7: a save that fails
+
+async function failedSave(browser, browserName, baseUrl) {
+  let tag = 'failed save';
+  const { context, page, problems } = await openPage(browser, baseUrl, SIZES[0], { storage: 'full', reducedMotion: 'reduce' });
+  const starter = await page.evaluate(() => window.SPELLCASTER_DATA.starterWords.length);
+  const openParent = async (target = page) => {
+    await hold(target, browserName, '#btn-parent', 2300);
+    await target.waitForSelector('#screen-parent:not([hidden])', { timeout: 3000 });
+  };
+  const saveWords = async (text, target = page) => {
+    await target.locator('#word-input').fill(text);
+    await tap(target, '#btn-save-words');
+    return (await target.locator('#parent-message').innerText()).trim();
+  };
+  const goHome = (target = page) => tap(target, '#screen-parent .parent-buttons-end [data-go="home"]');
+
+  // ---- the grown-up is told, and "Saved" is not claimed
+  check(!/save|visit/i.test(await page.locator('#screen-home').innerText()), `${tag}: the child's home screen says nothing about saving`);
+  await openParent();
+  check(await isShowing(page, '#save-note'), `${tag}: the grown-ups' corner says saving is not working, before anything is typed`);
+  const noteText = (await page.locator('#save-note').innerText()).replace(/\s+/g, ' ');
+  check(/only for this visit/.test(noteText) && /still works/.test(noteText), `${tag}: the notice is clear and gentle`, noteText);
+  check(!/error|fail|wrong|!/i.test(noteText), `${tag}: the notice does not alarm`, noteText);
+  let message = await saveWords('banana');
+  check(!/saved/i.test(message), `${tag}: the message does not claim the word was saved`, message);
+  check(/1 word/.test(message) && /this visit only/.test(message), `${tag}: the message says the word works for this visit only`, message);
+  check((await readSaved(page)) === null, `${tag}: nothing was written to localStorage`);
+  check((await page.locator('#parent-preview .chip').allInnerTexts()).join(',') === 'banana', `${tag}: the list is still used for this visit`);
+  check(await isShowing(page, '#save-note'), `${tag}: the notice stays after the failed save`);
+  await page.locator('.parent-body').evaluate((node) => { node.scrollTop = 0; });
+  await sleep(200);
+  await shot(page, '21-failed-save-portrait');
+  await tap(page, '#math-level [data-level="easy"]');
+  await tap(page, '#round-size [data-size="3"]');
+  check(await isShowing(page, '#save-note') && (await readSaved(page)) === null, `${tag}: settings changes keep the notice up`);
+  await tap(page, '#btn-starter');
+  message = (await page.locator('#parent-message').innerText()).trim();
+  check(/this visit only/.test(message), `${tag}: "Use starter list" also says it is for this visit only`, message);
+  await saveWords('banana');
+
+  // ---- the game still works for this visit
+  await goHome();
+  check((await page.locator('#spells-status').innerText()) === '0 of 1 word mastered', `${tag}: the home screen uses the new list`);
+  await tap(page, '#btn-spells');
+  await page.waitForSelector('#screen-play:not([hidden])');
+  let result = await playTurn(page, ['banana']);
+  check(result.model === 'banana' && result.kind === 'success', `${tag}: the new word can be played`, `${result.model} ${result.kind}`);
+  await tapNext(page);
+  await tap(page, '#btn-quit');
+
+  // ---- after a reload the list is gone, and the notice says why
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForSelector('#screen-home:not([hidden])');
+  check((await page.locator('#spells-status').innerText()) === `0 of ${starter} words mastered`, `${tag}: after a reload the starter list is back`,
+    await page.locator('#spells-status').innerText());
+  await openParent();
+  check(await isShowing(page, '#save-note'), `${tag}: the notice is there again after the reload`);
+  check((await page.locator('#parent-preview .chip').count()) === starter, `${tag}: the grown-up sees the starter list after the reload`);
+
+  // ---- when saving works again the notice goes away and "Saved" is true
+  await page.evaluate(() => { window.__storageFull = false; });
+  message = await saveWords('banana');
+  check(/^Saved 1 word/.test(message), `${tag}: once saving works the message says "Saved"`, message);
+  check(!(await isShowing(page, '#save-note')), `${tag}: once saving works the notice goes away`);
+  check(JSON.stringify((await readSaved(page)).words) === '["banana"]', `${tag}: once saving works the word is in localStorage`);
+
+  // ---- storage fills up in the middle of a visit
+  await page.evaluate(() => { window.__storageFull = true; });
+  await tap(page, '#round-size [data-size="8"]');
+  check(await isShowing(page, '#save-note'), `${tag}: the notice appears as soon as a save fails`);
+  check((await readSaved(page)).roundSize !== 8, `${tag}: the failed change is not in localStorage`);
+  await goHome();
+  await tap(page, '#btn-potions');
+  await page.waitForSelector('#screen-brew:not([hidden])');
+  const seen = await readBrew(page);
+  await tapDigits(page, solveBrew(seen).digits);
+  check((await brewAndSeeResult(page)) === 'brewed', `${tag}: potions still brew while saving fails`);
+  check((await page.locator('#screen-brew [data-stars]').innerText()).trim() === '2', `${tag}: stars still count for this visit`);
+  check(problems.length === 0, `${tag}: no console errors`, problems.slice(0, 3).join(' | '));
+  await context.close();
+
+  // ---- storage switched off completely
+  tag = 'blocked storage';
+  const blocked = await openPage(browser, baseUrl, SIZES[1], { storage: 'blocked', reducedMotion: 'reduce' });
+  await openParent(blocked.page);
+  check(await isShowing(blocked.page, '#save-note'), `${tag}: the grown-ups' corner says saving is not working`);
+  message = await saveWords('banana', blocked.page);
+  check(/this visit only/.test(message) && !/^Saved/.test(message), `${tag}: the message does not claim the word was saved`, message);
+  await blocked.page.locator('.parent-body').evaluate((node) => { node.scrollTop = 0; });
+  await sleep(200);
+  await shot(blocked.page, '21-failed-save-landscape');
+  await goHome(blocked.page);
+  await tap(blocked.page, '#btn-spells');
+  await blocked.page.waitForSelector('#screen-play:not([hidden])');
+  result = await playTurn(blocked.page, ['banana']);
+  check(result.kind === 'success', `${tag}: the game still plays`, result.kind);
+  check(blocked.problems.length === 0, `${tag}: no console errors`, blocked.problems.slice(0, 3).join(' | '));
+  await blocked.context.close();
+}
+
+// ---------------------------------------------------------------- review fix 8: long words stay in their card
+
+// Twelve letters is the longest word a grown-up can save. The last one is not
+// a word, just the widest twelve letters there are.
+const LONG_WORDS = ['announcement', 'commonwealth', 'mmmmmmmmwwww'];
+
+async function longWords(browser, baseUrl) {
+  for (const size of [...SIZES, ...TIGHT_SIZES]) {
+    const tight = TIGHT_SIZES.includes(size);
+    await Promise.all(LONG_WORDS.flatMap((word, i) => [
+      // ---- the copy step, with and without a voice
+      ...['stub', 'none'].map(async (speech) => {
+        const tag = `${size.name}, copying${speech === 'none' ? ' without a voice' : ''}`;
+        const { context, page, problems } = await openPage(browser, baseUrl, size, { speech, saved: { words: [word], custom: true }, reducedMotion: 'reduce' });
+        await tap(page, '#btn-spells');
+        await page.waitForSelector('#screen-play:not([hidden])');
+        await checkModelFits(page, tag, word);
+        const turn = await readTurn(page, [word]);
+        await tapLetters(page, planTaps(turn, false));
+        await checkPlayLayout(page, `${tag} "${word}"`);
+        await checkCardHolds(page, `${tag} "${word}"`);
+        check(await listenButtons(page) === (speech === 'none' ? '' : 'btn-hear btn-slow'), `${tag}: the right buttons are under "${word}"`, await listenButtons(page));
+        if (tight && i === 0 && speech === 'stub') await shot(page, `22-long-word-${size.name}-copy`);
+        check((await castAndSeeResult(page)) === 'success', `${tag}: "${word}" can be copied`);
+        check(problems.length === 0, `${tag}: no console errors with "${word}"`, problems.slice(0, 2).join(' | '));
+        await context.close();
+      }),
+      // ---- the peek that stands in for the voice
+      (async () => {
+        const tag = `${size.name}, peeking`;
+        const saved = { words: [word], custom: true, progress: { [word]: { step: 3, mastered: 0, best: 0, last: 0 } } };
+        const { context, page, problems } = await openPage(browser, baseUrl, size, { speech: 'none', saved, reducedMotion: 'reduce' });
+        await tap(page, '#btn-spells');
+        await page.waitForSelector('#screen-play:not([hidden])');
+        await page.waitForSelector('#model.is-peek', { state: 'visible', timeout: 3000 }).catch(() => {});
+        await checkModelFits(page, tag, word);
+        await checkCardHolds(page, `${tag} "${word}"`);
+        await checkPlayLayout(page, `${tag} "${word}"`);
+        if (tight && i === 1) await shot(page, `22-long-word-${size.name}-peek`);
+        check(problems.length === 0, `${tag}: no console errors with "${word}"`, problems.slice(0, 2).join(' | '));
+        await context.close();
+      })(),
+    ]));
+  }
+
+  // Turning the iPad while a long word is showing: it is fitted again.
+  const word = LONG_WORDS[0];
+  const { context, page, problems } = await openPage(browser, baseUrl, SIZES[1], { saved: { words: [word], custom: true }, reducedMotion: 'reduce' });
+  await tap(page, '#btn-spells');
+  await page.waitForSelector('#screen-play:not([hidden])');
+  await checkModelFits(page, 'landscape, before turning', word);
+  await page.setViewportSize({ width: TIGHT_SIZES[2].width, height: TIGHT_SIZES[2].height });
+  await sleep(300);
+  await checkModelFits(page, 'turned to a small portrait', word);
+  await page.setViewportSize({ width: SIZES[1].width, height: SIZES[1].height });
+  await sleep(300);
+  await checkModelFits(page, 'turned back to landscape', word);
+  const big = await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector('#model')).fontSize));
+  check(big >= 50, 'turned back to landscape: the word grows again when there is room', `${big}px`);
+  check(problems.length === 0, 'turning the iPad with a long word: no console errors', problems.slice(0, 2).join(' | '));
+  await context.close();
+}
+
+// ---------------------------------------------------------------- review fix 9: tiles only, no keyboard answers
+
+// A keyboard plugged into the iPad must not be a way to answer: letters and
+// numbers go in through the on-screen tiles only. A button that has the focus
+// still works the ordinary way (Enter or Space), which is what switch access
+// and other assistive tools rely on.
+async function keyboardCannotAnswer(browser, baseUrl) {
+  // ---- Spells
+  let tag = 'spells with a keyboard';
+  const spells = await openPage(browser, baseUrl, SIZES[1], { saved: { words: ['cat'], custom: true }, reducedMotion: 'reduce' });
+  let page = spells.page;
+  await tap(page, '#btn-spells');
+  await page.waitForSelector('#screen-play:not([hidden])');
+  for (const key of ['c', 'a', 't', 'C', 'A', 'T', "'", 'Backspace', 'Enter', ' ']) await page.keyboard.press(key === ' ' ? 'Space' : key);
+  let turn = await readTurn(page, ['cat']);
+  check(turn.slots.every((slot) => !slot.ch) && turn.tiles.every((tile) => !tile.used), `${tag}: letter keys do not place letters`,
+    turn.slots.map((slot) => slot.ch || '_').join(''));
+  await tapLetters(page, ['c', 'a']);
+  await page.keyboard.press('Backspace');
+  turn = await readTurn(page, ['cat']);
+  check(turn.slots.map((slot) => slot.ch).join('') === 'ca', `${tag}: Backspace does not undo`, turn.slots.map((slot) => slot.ch || '_').join(''));
+  await tapLetters(page, ['t']);
+  await page.evaluate(() => document.activeElement && document.activeElement.blur());
+  await page.keyboard.press('Enter');
+  await sleep(400);
+  check(!(await isShowing(page, '#result')), `${tag}: Enter does not cast the spell`);
+  check((await castAndSeeResult(page)) === 'success', `${tag}: the Cast button still does`);
+  await page.evaluate(() => document.activeElement && document.activeElement.blur());
+  await sleep(420);
+  await page.keyboard.press('Enter');
+  await sleep(300);
+  check(await isShowing(page, '#result'), `${tag}: Enter does not skip the result card`);
+  await tapNext(page);
+  // Ordinary activation of a focused button is left alone.
+  turn = await readTurn(page, ['cat']);
+  const firstOpen = turn.slots.findIndex((slot) => !slot.fixed);
+  await page.focus(`#tiles .tile:not(:disabled)[data-letter="${'cat'[firstOpen]}"]`);
+  await page.keyboard.press('Enter');
+  turn = await readTurn(page, ['cat']);
+  check(turn.slots[firstOpen].ch === 'cat'[firstOpen], `${tag}: a focused tile still answers to Enter, like any button`, turn.slots.map((slot) => slot.ch || '_').join(''));
+  await page.focus('#btn-undo');
+  await page.keyboard.press('Space');
+  turn = await readTurn(page, ['cat']);
+  check(turn.slots.every((slot) => slot.fixed || !slot.ch), `${tag}: a focused Undo button still answers to Space`);
+  check(turn.focus !== 'INPUT' && turn.focus !== 'TEXTAREA', `${tag}: no text field is focused`, turn.focus);
+  check(spells.problems.length === 0, `${tag}: no console errors`, spells.problems.slice(0, 3).join(' | '));
+  await spells.context.close();
+
+  // ---- Potions
+  tag = 'potions with a keyboard';
+  const potions = await openPage(browser, baseUrl, SIZES[1], { reducedMotion: 'reduce' });
+  page = potions.page;
+  await tap(page, '#btn-potions');
+  await page.waitForSelector('#screen-brew:not([hidden])');
+  const want = solveBrew(await readBrew(page));
+  for (const key of [...want.digits, '9', 'Backspace', 'Enter']) await page.keyboard.press(key);
+  await sleep(400);
+  check((await readBrew(page)).slots.every((ch) => !ch), `${tag}: number keys do not type an answer`, (await readBrew(page)).slots.join('|'));
+  check(!(await isShowing(page, '#result')), `${tag}: Enter does not brew the potion`);
+  await tapDigits(page, want.digits);
+  await page.keyboard.press('Backspace');
+  check((await readBrew(page)).slots.filter((ch) => ch).join('') === want.digits, `${tag}: Backspace does not erase`);
+  await page.evaluate(() => document.activeElement && document.activeElement.blur());
+  await page.keyboard.press('Enter');
+  await sleep(400);
+  check(!(await isShowing(page, '#result')), `${tag}: Enter does not brew a typed answer either`);
+  await page.focus('#btn-brew');
+  await page.keyboard.press('Enter');
+  await page.waitForSelector('#result:not([hidden])', { timeout: 3000 }).catch(() => {});
+  check((await page.getAttribute('#result', 'data-kind')) === 'brewed' && await isShowing(page, '#result'),
+    `${tag}: a focused Brew button still answers to Enter, like any button`);
+  check(potions.problems.length === 0, `${tag}: no console errors`, potions.problems.slice(0, 3).join(' | '));
+  await potions.context.close();
 }
 
 // ---------------------------------------------------------------- run
@@ -1517,7 +2325,17 @@ const scenarios = [
   ...SIZES.map((size) => [`potions whole round, ${size.name} ${size.width}x${size.height}`, (b, name, url) => potionsRound(b, url, size)]),
   ['potions settings in the grown-ups corner', (b, name, url) => potionsSettings(b, name, url)],
   ['potions on tight screens with the trickiest pictures', (b, name, url) => potionsTight(b, url)],
-  ['potions without speech, without motion, with a keyboard', (b, name, url) => potionsQuiet(b, url)],
+  ['potions without speech and without motion', (b, name, url) => potionsQuiet(b, url)],
+  // One scenario for each finding of the independent review (REVIEW.md).
+  ['review 1: only on-device voices ever speak', (b, name, url) => localVoicesOnly(b, name, url)],
+  ['review 2: a voice that fails leaves a clue on screen', (b, name, url) => speechFailures(b, url)],
+  ['review 3: a missed word comes back within a few turns', (b, name, url) => retryGap(b, url)],
+  ['review 4: the word "constructor" climbs the ladder', (b, name, url) => constructorWord(b, name, url)],
+  ['review 5: no voice on every iPad size, nothing clipped', (b, name, url) => compactNoVoice(b, url)],
+  ['review 6: potions easy skip counting stays within 20', (b, name, url) => easySkipRound(b, url)],
+  ['review 7: a save that fails is not called saved', (b, name, url) => failedSave(b, name, url)],
+  ['review 8: long words stay inside their card', (b, name, url) => longWords(b, url)],
+  ['review 9: a keyboard cannot enter answers', (b, name, url) => keyboardCannotAnswer(b, url)],
 ];
 
 fs.mkdirSync(SHOTS, { recursive: true });
