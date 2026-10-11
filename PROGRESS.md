@@ -164,3 +164,4 @@ one). Every scenario was also run against the code from before the fix, where it
 - 2026-10-11: Claude fixed the remaining finding 2 (playback failure kept apart from voice
   availability) and added the `review 2 again` scenario; `npm test` passes, 2,207 checks.
   Not committed (as asked). Next: commit, push, third look by the reviewer if wanted.
+- Codex verified finding 2 fixed (REVIEW3.md). Code complete; awaiting Render dashboard Blueprint setup by Sonny.
