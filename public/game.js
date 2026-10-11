@@ -1,9 +1,10 @@
-// Spellcaster Academy — a spelling game where every word is a spell.
-// Single plain script, no dependencies, no network. Data lives in words.js.
+// Spellcaster Academy — every spelling word is a spell, every math problem is a potion.
+// Single plain script, no dependencies, no network. Data lives in words.js and potions.js.
 (() => {
   'use strict';
 
   const DATA = window.SPELLCASTER_DATA;
+  const POTIONS = window.SPELLCASTER_POTIONS;
   const STORE_KEY = 'spellcaster-academy-v1';
 
   const MIN_LEN = 2;
@@ -14,8 +15,12 @@
   const ALPHABET = 'abcdefghijklmnopqrstuvwxyz'.split('');
   const VOWELS = 'aeiou'.split('');
 
+  const POTIONS_PER_ROUND = 8;
+  const MAX_DIGITS = 3; // potion answers go up to 100
+
   const WORD_RATE = 0.85;
   const SLOW_RATE = 0.55;
+  const PROBLEM_SLOW_RATE = 0.65; // a whole sentence, so not quite as slow as one word
   const PEEK_MS = 2600;
 
   const STEP_TITLES = {
@@ -87,13 +92,20 @@
   // ------------------------------------------------------------------
   // Saved state (localStorage only)
   // ------------------------------------------------------------------
+  function freshMath() {
+    const topics = {};
+    for (const topic of POTIONS.topics) topics[topic.id] = true;
+    return { level: 'hundred', topics, brewed: 0 }; // level: 'easy' (within 20) or 'hundred'
+  }
+
   function freshState() {
     return {
       words: DATA.starterWords.slice(),
       custom: false,
       roundSize: 5, // 0 means "all words"
       progress: {}, // word -> { step, mastered, best, last }
-      stars: 0,
+      math: freshMath(),
+      stars: 0, // shared by spells and potions
       robe: DATA.robes[0].id,
       familiar: DATA.familiars[0].id,
       chimes: true,
@@ -122,6 +134,18 @@
               last: Number(p.last) || 0,
             };
           }
+        }
+        if (saved.math && typeof saved.math === 'object') {
+          const math = saved.math;
+          if (POTIONS.levels.includes(math.level)) state.math.level = math.level;
+          if (math.topics && typeof math.topics === 'object') {
+            for (const topic of POTIONS.topics) {
+              if (typeof math.topics[topic.id] === 'boolean') state.math.topics[topic.id] = math.topics[topic.id];
+            }
+            // Never leave every topic switched off.
+            if (!POTIONS.topics.some((topic) => state.math.topics[topic.id])) state.math.topics = freshMath().topics;
+          }
+          if (Number.isFinite(math.brewed) && math.brewed >= 0) state.math.brewed = Math.floor(math.brewed);
         }
         if (typeof saved.chimes === 'boolean') state.chimes = saved.chimes;
         const robe = DATA.robes.find((r) => r.id === saved.robe);
@@ -450,32 +474,43 @@
       stopPeek();
       turn = null;
     }
+    if (activeScreen === 'brew' && name !== 'brew') {
+      speech.hush();
+      brew = null;
+    }
     activeScreen = name;
     for (const screen of screens) screen.hidden = screen.dataset.screen !== name;
     document.body.dataset.screen = name;
     if (name === 'home') renderHome();
     if (name === 'wardrobe') renderWardrobe();
     if (name === 'book') renderBook();
-    if (name === 'parent') renderParent();
+    if (name === 'parent') {
+      renderParent();
+      $('.parent-body').scrollTop = 0; // always open at the top, not where it was left
+    }
     renderStars();
   }
 
   // ------------------------------------------------------------------
   // Speech notes (shown only when the device cannot talk)
   // ------------------------------------------------------------------
+  const SPEECH_NOTES = {
+    home: '🔇 This device can’t talk out loud. You can still play — everything is shown on the screen!',
+    spells: '🔇 This device can’t say the spells out loud. You can still play — the spell will flash for a moment instead!',
+    potions: '🔇 This device can’t read out loud. You can still brew — every recipe is written right here!',
+  };
+
   function onSpeechChange() {
-    const note = speech.works
-      ? ''
-      : '🔇 This device can’t say the spells out loud. You can still play — the spell will flash for a moment instead!';
     for (const node of $$('[data-speech-note]')) {
-      node.textContent = note;
-      node.hidden = !note;
+      node.textContent = speech.works ? '' : SPEECH_NOTES[node.dataset.speechNote];
+      node.hidden = speech.works;
     }
     renderVoiceStatus();
     if (activeScreen === 'play' && turn) {
       renderListenRow();
       if (!speech.works && turn.step > 1 && !turn.peeked) peek();
     }
+    if (activeScreen === 'brew' && brew) renderBrewListenRow();
   }
 
   // ------------------------------------------------------------------
@@ -493,16 +528,15 @@
   function renderHome() {
     const total = state.words.length;
     const mastered = state.words.filter((w) => progressFor(w).mastered).length;
-    const ready = roundWords().length;
-    $('#home-status').textContent = mastered === total
-      ? `You know all ${plural(total, 'spell')}! Practice makes them stronger.`
-      : `${plural(ready, 'spell')} ready · ${mastered} of ${total} mastered`;
+    const brewed = state.math.brewed;
+    $('#spells-status').textContent = `${mastered} of ${plural(total, 'word')} mastered`;
+    $('#potions-status').textContent = brewed ? `${plural(brewed, 'potion')} brewed` : 'Number magic';
   }
 
   // ------------------------------------------------------------------
-  // A round of play
+  // Spells: a round of spelling
   // ------------------------------------------------------------------
-  let session = null; // { items, queue, earned, unlocks }
+  let session = null; // { mode: 'spells' | 'potions', items, queue, earned, unlocks }
   let turn = null;    // the word on screen right now
   let outcomeBag = [];
 
@@ -514,7 +548,7 @@
       done: false,
       stars: 0,
     }));
-    session = { items, queue: items.slice(), earned: 0, unlocks: [] };
+    session = { mode: 'spells', items, queue: items.slice(), earned: 0, unlocks: [] };
     hideResult();
     show('play');
     renderRoundProgress();
@@ -610,13 +644,16 @@
   const castBtn = $('#btn-cast');
 
   function renderRoundProgress() {
-    const box = $('#round-progress');
+    const potions = session.mode === 'potions';
+    const box = $(potions ? '#brew-progress' : '#round-progress');
     box.textContent = '';
     for (const item of session.items) {
       box.append(el('span', item.done ? 'rp-star is-done' : 'rp-star', '★'));
     }
     const done = session.items.filter((i) => i.done).length;
-    box.setAttribute('aria-label', `${done} of ${plural(session.items.length, 'spell')} mastered this round`);
+    box.setAttribute('aria-label', potions
+      ? `${done} of ${plural(session.items.length, 'potion')} brewed this round`
+      : `${done} of ${plural(session.items.length, 'spell')} mastered this round`);
   }
 
   function showModel(word, className) {
@@ -771,20 +808,25 @@
     refreshBoard(false);
     const info = settle(ok, guess);
 
-    playScreen.classList.add(ok ? 'is-casting-ok' : 'is-casting-fizzle');
-    const wand = $('.wand-star', playScreen);
-    const slotsAt = centerOf(slotsBox);
-    if (ok) {
-      chimes.success();
-      if (wand) { const at = centerOf(wand); burst(at.x, at.y, ['✨', '⭐', '💖', '✨'], 10, 130); }
-      burst(slotsAt.x, slotsAt.y, ['✨', '⭐', '🌟', '💜'], 14, 220);
-    } else {
-      chimes.fizzle();
-      burst(slotsAt.x, slotsAt.y, ['💨', '☁️'], 6, 110);
-    }
+    castEffects(playScreen, ok, { sparkle: $('.wand-star', playScreen), slots: slotsBox, smoke: slotsBox });
     setTimeout(() => {
       if (turn === thisTurn && activeScreen === 'play') showResult(info);
     }, calm() ? 150 : 950);
+  }
+
+  // The wand swing, then sparkles for a spell or potion that worked, or a soft puff of smoke.
+  function castEffects(screen, ok, { sparkle, slots, smoke }) {
+    screen.classList.add(ok ? 'is-casting-ok' : 'is-casting-fizzle');
+    if (ok) {
+      chimes.success();
+      if (sparkle) { const at = centerOf(sparkle); burst(at.x, at.y, ['✨', '⭐', '💖', '✨'], 10, 130); }
+      const slotsAt = centerOf(slots);
+      burst(slotsAt.x, slotsAt.y, ['✨', '⭐', '🌟', '💜'], 14, 220);
+    } else {
+      chimes.fizzle();
+      const at = centerOf(smoke);
+      burst(at.x, at.y, ['💨', '☁️'], 6, 110);
+    }
   }
 
   // Works out what the cast means for the word's ladder, the queue and the stars.
@@ -875,17 +917,39 @@
     box.setAttribute('aria-label', word);
   }
 
+  // Big stars on the result card: `won` of `outOf` are lit.
+  function showBigStars(won, outOf) {
+    const starsBox = $('#result-stars');
+    starsBox.textContent = '';
+    for (let i = 1; i <= outOf; i++) {
+      const star = el('span', i <= won ? 'big-star is-won' : 'big-star', '⭐');
+      star.style.setProperty('--i', String(i));
+      starsBox.append(star);
+    }
+    starsBox.setAttribute('aria-label', `You earned ${plural(won, 'star')}`);
+    starsBox.hidden = false;
+  }
+
+  function clearResultCard() {
+    $('#result-stars').hidden = true;
+    $('#result-extra').hidden = true;
+    $('#result-extra').textContent = '';
+    $('#result-word').classList.remove('is-solved');
+    confetti($('#result-confetti'), 0);
+  }
+
+  function openResultCard() {
+    resultBox.hidden = false;
+    resultShownAt = Date.now();
+  }
+
   function showResult(info) {
     const title = $('#result-title');
     const text = $('#result-text');
-    const starsBox = $('#result-stars');
     const extra = $('#result-extra');
     const nextBtn = $('#btn-next');
     const lastOne = session.queue.length === 0;
-    starsBox.hidden = true;
-    extra.hidden = true;
-    extra.textContent = '';
-    confetti($('#result-confetti'), 0);
+    clearResultCard();
     letterRow($('#result-word'), info.word);
 
     if (!info.ok) {
@@ -905,14 +969,7 @@
       if (info.mastered) {
         resultBox.dataset.kind = 'mastered';
         title.textContent = 'Spell mastered!';
-        starsBox.textContent = '';
-        for (let i = 1; i <= 3; i++) {
-          const star = el('span', i <= info.stars ? 'big-star is-won' : 'big-star', '⭐');
-          star.style.setProperty('--i', String(i));
-          starsBox.append(star);
-        }
-        starsBox.setAttribute('aria-label', `You earned ${plural(info.stars, 'star')}`);
-        starsBox.hidden = false;
+        showBigStars(info.stars, 3);
         if (info.unlocks.length) {
           extra.textContent = info.unlocks.map((u) => `🎁 New: ${u.name}!`).join('  ');
           extra.hidden = false;
@@ -931,8 +988,7 @@
       }
       nextBtn.textContent = lastOne ? 'Finish ➜' : 'Next spell ➜';
     }
-    resultBox.hidden = false;
-    resultShownAt = Date.now();
+    openResultCard();
   }
 
   function hideResult() {
@@ -944,20 +1000,27 @@
     if (resultBox.hidden || !session) return;
     if (Date.now() - resultShownAt < 350) return; // ignore a stray double-tap
     hideResult();
-    nextTurn();
+    if (session.mode === 'potions') nextBrew();
+    else nextTurn();
   }
 
   function finishRound() {
     turn = null;
+    brew = null;
+    const potions = session.mode === 'potions';
     const earned = session.earned;
     const count = session.items.length;
-    $('#done-summary').textContent =
-      `You mastered ${plural(count, 'spell')} and earned ${plural(earned, 'star')}!`;
+    const title = potions ? 'All potions brewed!' : 'Spellbook complete!';
+    $('#done-title').textContent = title;
+    $('#done-summary').textContent = potions
+      ? `You brewed ${plural(count, 'potion')} and earned ${plural(earned, 'star')}!`
+      : `You mastered ${plural(count, 'spell')} and earned ${plural(earned, 'star')}!`;
     const list = $('#done-words');
     list.textContent = '';
     for (const item of session.items) {
       const row = el('li', 'done-word');
-      row.append(el('span', 'done-word-text', item.word), el('span', 'done-word-stars', '⭐'.repeat(item.stars)));
+      const name = potions ? item.problem.label : item.word;
+      row.append(el('span', 'done-word-text', name), el('span', 'done-word-stars', '⭐'.repeat(item.stars)));
       list.append(row);
     }
     const unlockBox = $('#done-unlocks');
@@ -969,7 +1032,328 @@
     const trophy = centerOf($('.done-trophy'));
     burst(trophy.x, trophy.y, ['⭐', '✨', '🌟', '💖', '💜'], 22, 260);
     chimes.mastered();
-    speech.say(`Spellbook complete! You earned ${plural(earned, 'star')}!`, { rate: 0.95, pitch: 1.2 });
+    speech.say(`${title} You earned ${plural(earned, 'star')}!`, { rate: 0.95, pitch: 1.2 });
+  }
+
+  // ------------------------------------------------------------------
+  // Potions: a round of math. Every problem is a potion to brew.
+  // ------------------------------------------------------------------
+  let brew = null; // the potion in the cauldron right now: { item, problem, placed, busy }
+  let brewBag = [];
+
+  const brewScreen = $('#screen-brew');
+  const brewSlots = $('#brew-slots');
+  const brewTiles = $('#brew-tiles');
+  const problemBox = $('#brew-problem');
+  const brewUndoBtn = $('#btn-brew-undo');
+  const brewBtn = $('#btn-brew');
+
+  function startBrewRound() {
+    const items = POTIONS.makeRound(state.math, POTIONS_PER_ROUND).map((problem) => ({
+      problem,
+      misses: 0,
+      done: false,
+      stars: 0,
+    }));
+    session = { mode: 'potions', items, queue: items.slice(), earned: 0, unlocks: [] };
+    hideResult();
+    show('brew');
+    renderRoundProgress();
+    nextBrew({ queue: true });
+  }
+
+  function nextBrew(speechOptions) {
+    if (!session.queue.length) {
+      finishRound();
+      return;
+    }
+    const item = session.queue.shift();
+    brew = { item, problem: item.problem, placed: [], busy: false };
+    renderBrew();
+    sayProblem(speechOptions);
+  }
+
+  // A clock answer has a box for every digit (3:30); other answers are typed freely.
+  const isClock = () => brew.problem.format === 'time';
+  const brewRoom = () => (isClock() ? brew.problem.answer.length : MAX_DIGITS);
+  const brewReady = () => (isClock() ? brew.placed.length === brewRoom() : brew.placed.length > 0);
+
+  function brewIsRight() {
+    const guess = brew.placed.join('');
+    return isClock() ? guess === brew.problem.answer : Number(guess) === Number(brew.problem.answer);
+  }
+
+  // ---------- drawing the problem ----------
+  function clockSVG(hour, minute) {
+    const hourTurn = (hour % 12) * 30 + minute / 2;
+    const minuteTurn = minute * 6;
+    let numbers = '';
+    for (let n = 1; n <= 12; n++) {
+      const a = (n * Math.PI) / 6;
+      numbers += `<text x="${(100 + 70 * Math.sin(a)).toFixed(1)}" y="${(100 - 70 * Math.cos(a)).toFixed(1)}">${n}</text>`;
+    }
+    const label = `A clock. The short hand is ${minute ? 'halfway past' : 'at'} ${hour} and the long hand is at ${minute ? 6 : 12}.`;
+    return `
+<svg class="clock-svg" viewBox="0 0 200 200" role="img" aria-label="${label}">
+  <circle cx="100" cy="100" r="97" fill="#8f5cf0"/>
+  <circle cx="100" cy="100" r="87" fill="#fffdf7"/>
+  <g class="clock-numbers">${numbers}</g>
+  <line class="clock-hand clock-hour" x1="100" y1="108" x2="100" y2="62" transform="rotate(${hourTurn} 100 100)"/>
+  <line class="clock-hand clock-minute" x1="100" y1="110" x2="100" y2="47" transform="rotate(${minuteTurn} 100 100)"/>
+  <circle cx="100" cy="100" r="7" fill="#ffd75e" stroke="#43217a" stroke-width="3"/>
+</svg>`;
+  }
+
+  // One little painter for each kind of `show` a recipe can ask for.
+  const problemArt = {
+    equation({ parts, wordy }) {
+      const row = el('div', wordy ? 'eq eq-wordy' : 'eq');
+      for (const part of parts) {
+        const kind = part === '?' ? 'eq-blank' : /^\d/.test(part) ? 'eq-num' : 'eq-op';
+        row.append(el('span', kind, part));
+      }
+      return row;
+    },
+
+    number({ value }) {
+      const row = el('div', 'eq');
+      row.append(el('span', 'eq-num eq-huge', String(value)));
+      return row;
+    },
+
+    // Place-value blocks: a rod is ten, a cube is one.
+    blocks({ tens, ones }) {
+      const box = el('div', 'blocks');
+      const group = (name, count, shape) => {
+        const pile = el('div', `blocks-pile blocks-${name}`);
+        for (let i = 0; i < count; i++) pile.append(el('span', shape));
+        const wrap = el('div', 'blocks-group');
+        wrap.append(pile, el('span', 'blocks-name', name));
+        return wrap;
+      };
+      box.append(group('tens', tens, 'pv-rod'), group('ones', ones, 'pv-cube'));
+      box.setAttribute('role', 'img');
+      box.setAttribute('aria-label', `${plural(tens, 'ten-rod')} and ${plural(ones, 'ones-cube')}`);
+      return box;
+    },
+
+    sequence({ items }) {
+      const row = el('div', 'seq');
+      for (const item of items) {
+        row.append(el('span', item === null ? 'seq-item is-blank' : 'seq-item', item === null ? '?' : String(item)));
+      }
+      return row;
+    },
+
+    story({ emoji, lines }) {
+      const box = el('div', 'story');
+      const picture = el('span', 'story-emoji', emoji);
+      picture.setAttribute('aria-hidden', 'true');
+      const text = el('p', 'story-text');
+      lines.forEach((line, i) => {
+        text.append(el('span', i === lines.length - 1 ? 'story-line story-ask' : 'story-line', line));
+      });
+      box.append(picture, text);
+      return box;
+    },
+
+    clock({ hour, minute }) {
+      const box = el('div', 'clock');
+      box.innerHTML = clockSVG(hour, minute);
+      return box;
+    },
+
+    coins({ cents }) {
+      const row = el('div', 'coins');
+      for (const value of cents) {
+        const coin = el('span', 'coin', `${value}¢`);
+        coin.dataset.cents = String(value);
+        row.append(coin);
+      }
+      row.setAttribute('role', 'img');
+      row.setAttribute('aria-label', `Coins: ${cents.map((value) => plural(value, 'cent')).join(', ')}`);
+      return row;
+    },
+  };
+
+  // Either the listen buttons or the "can't read out loud" note, never both.
+  function renderBrewListenRow() {
+    $('#brew-listen').hidden = !speech.works;
+  }
+
+  function renderBrew() {
+    const { problem } = brew;
+    const topic = POTIONS.topics.find((t) => t.id === problem.topic);
+    brewScreen.dataset.topic = problem.topic;
+    brewScreen.classList.remove('is-casting-ok', 'is-casting-fizzle');
+    brewScreen.style.setProperty('--potion', topic.color);
+    $('#brew-icon').textContent = topic.icon;
+    $('#brew-title').textContent = problem.title;
+    problemBox.textContent = '';
+    problemBox.dataset.show = problem.show.type;
+    problemBox.append(problemArt[problem.show.type](problem.show));
+    renderBrewListenRow();
+    refreshBrewBoard(false);
+  }
+
+  // `pop` plays the little landing animation on the number that was just placed.
+  function renderBrewSlots(pop) {
+    const { problem, placed } = brew;
+    brewSlots.textContent = '';
+    const cells = []; // { ch, kind } — kind 'mark' is a sign such as : or ¢, not a box
+    if (isClock()) {
+      const hourDigits = problem.answer.length - 2;
+      for (let i = 0; i < problem.answer.length; i++) {
+        if (i === hourDigits) cells.push({ ch: ':', kind: 'mark' });
+        const kind = i < placed.length ? 'is-filled' : i === placed.length ? 'is-next' : 'is-empty';
+        cells.push({ ch: placed[i] || '', kind });
+      }
+    } else {
+      placed.forEach((digit) => cells.push({ ch: digit, kind: 'is-filled' }));
+      if (placed.length < MAX_DIGITS) cells.push({ ch: '', kind: 'is-next' });
+      if (problem.unit) cells.push({ ch: problem.unit, kind: 'mark' });
+    }
+    let boxes = 0;
+    for (const cell of cells) {
+      if (cell.kind === 'mark') {
+        brewSlots.append(el('span', 'slot-mark', cell.ch));
+        continue;
+      }
+      boxes += 1;
+      const slot = el('span', `slot ${cell.kind}${pop && boxes === placed.length ? ' is-new' : ''}`, cell.ch);
+      slot.style.setProperty('--i', String(boxes - 1));
+      brewSlots.append(slot);
+    }
+    brewSlots.style.setProperty('--n', String(Math.max(cells.length, 4)));
+    brewSlots.setAttribute('aria-label', `Your answer: ${cells.map((c) => c.ch || 'blank').join(' ')}`);
+  }
+
+  // Repaint the answer boxes, number tiles and buttons after every tap.
+  function refreshBrewBoard(pop) {
+    renderBrewSlots(pop);
+    const full = brew.placed.length >= brewRoom();
+    for (const btn of $$('.tile', brewTiles)) {
+      btn.classList.toggle('is-resting', full);
+      btn.disabled = brew.busy;
+    }
+    brewUndoBtn.disabled = brew.busy || !brew.placed.length;
+    const ready = brewReady() && !brew.busy;
+    brewBtn.disabled = !ready;
+    brewBtn.classList.toggle('is-ready', ready);
+  }
+
+  // ---------- brewing the potion ----------
+  function tapDigit(digit) {
+    if (!brew || brew.busy) return;
+    if (brew.placed.length >= brewRoom()) {
+      nudge(brewBtn);
+      return;
+    }
+    brew.placed.push(digit);
+    chimes.tap();
+    refreshBrewBoard(true);
+  }
+
+  function brewUndo() {
+    if (!brew || brew.busy || !brew.placed.length) return;
+    brew.placed.pop();
+    chimes.undo();
+    refreshBrewBoard(false);
+  }
+
+  function sayProblem({ slow = false, queue = false } = {}) {
+    if (!brew) return;
+    speech.say(brew.problem.say, { rate: slow ? PROBLEM_SLOW_RATE : WORD_RATE, pitch: 1.05, queue });
+  }
+
+  function brewPotion() {
+    if (!brew || brew.busy || !brewReady()) return;
+    const thisBrew = brew;
+    const ok = brewIsRight();
+    brew.busy = true;
+    refreshBrewBoard(false);
+    const info = settleBrew(ok);
+
+    const cauldron = $('#cauldron');
+    castEffects(brewScreen, ok, { sparkle: cauldron, slots: brewSlots, smoke: cauldron });
+    setTimeout(() => {
+      if (brew === thisBrew && activeScreen === 'brew') showBrewResult(info);
+    }, calm() ? 150 : 950);
+  }
+
+  // Works out what the brew means for the queue and the stars.
+  function settleBrew(ok) {
+    const item = brew.item;
+    const info = { ok, problem: item.problem, stars: 0, unlocks: [] };
+    if (ok) {
+      item.done = true;
+      item.stars = item.misses === 0 ? 2 : 1;
+      const before = state.stars;
+      state.stars += item.stars;
+      state.math.brewed += 1;
+      session.earned += item.stars;
+      info.stars = item.stars;
+      info.unlocks = newUnlocks(before, state.stars);
+      session.unlocks.push(...info.unlocks);
+    } else {
+      // Missed: the same potion comes back a few turns later.
+      item.misses += 1;
+      session.queue.splice(Math.min(3, session.queue.length), 0, item);
+    }
+    saveState();
+    return info;
+  }
+
+  function nextBrewScene() {
+    if (!brewBag.length) brewBag = shuffle(POTIONS.brews);
+    return brewBag.pop();
+  }
+
+  // The finished sum, with the answer standing out: 27 + 15 = [42]
+  function solvedRow(box, [before, answer, after]) {
+    box.textContent = '';
+    box.classList.add('is-solved');
+    box.append(before, el('span', 'solved-answer', answer), after);
+    box.setAttribute('aria-label', `${before}${answer}${after}`);
+  }
+
+  function showBrewResult(info) {
+    const { problem } = info;
+    const title = $('#result-title');
+    const text = $('#result-text');
+    const extra = $('#result-extra');
+    const nextBtn = $('#btn-next');
+    clearResultCard();
+    solvedRow($('#result-word'), problem.solved);
+
+    if (!info.ok) {
+      resultBox.dataset.kind = 'fizzle';
+      title.textContent = 'Oops! The potion fizzled';
+      renderScene($('#result-scene'), { main: '💨', orbit: '✨', move: 'float' });
+      text.textContent = `${pick(POTIONS.fizzles)} Here is the recipe:`;
+      extra.textContent = 'We’ll try it again soon!';
+      extra.hidden = false;
+      nextBtn.textContent = 'Keep going 💜';
+      speech.say(`Oops, the potion fizzled. ${problem.sayAnswer} We will try it again soon.`, { rate: 0.95 });
+    } else {
+      const scene = nextBrewScene();
+      const cheer = pick(POTIONS.cheers);
+      resultBox.dataset.kind = 'brewed';
+      title.textContent = cheer;
+      renderScene($('#result-scene'), scene);
+      text.textContent = scene.say;
+      showBigStars(info.stars, 2);
+      if (info.unlocks.length) {
+        extra.textContent = info.unlocks.map((u) => `🎁 New: ${u.name}!`).join('  ');
+        extra.hidden = false;
+      }
+      confetti($('#result-confetti'), 24);
+      renderRoundProgress();
+      renderStars();
+      nextBtn.textContent = session.queue.length ? 'Next potion ➜' : 'Finish ➜';
+      speech.say(`${cheer} ${scene.say}`, { rate: 0.95, pitch: 1.2 });
+    }
+    openResultCard();
   }
 
   // ------------------------------------------------------------------
@@ -1081,9 +1465,57 @@
     }
   }
 
+  function renderParentMath(message = '') {
+    for (const btn of $$('#math-level .seg-btn')) {
+      const chosen = btn.dataset.level === state.math.level;
+      btn.classList.toggle('is-chosen', chosen);
+      btn.setAttribute('aria-pressed', String(chosen));
+    }
+    const box = $('#math-topics');
+    if (!box.children.length) {
+      for (const topic of POTIONS.topics) {
+        const btn = el('button', 'toggle');
+        btn.type = 'button';
+        btn.dataset.topic = topic.id;
+        const icon = el('span', 'toggle-icon', topic.icon);
+        icon.setAttribute('aria-hidden', 'true');
+        btn.append(icon, el('span', 'toggle-name', topic.name), el('span', 'toggle-mark'));
+        box.append(btn);
+      }
+    }
+    for (const btn of $$('.toggle', box)) {
+      const on = state.math.topics[btn.dataset.topic];
+      btn.classList.toggle('is-on', on);
+      btn.setAttribute('aria-pressed', String(on));
+      $('.toggle-mark', btn).textContent = on ? '✓' : 'off';
+    }
+    $('#math-message').textContent = message;
+  }
+
+  function setMathLevel(level) {
+    state.math.level = level;
+    saveState();
+    renderParentMath(level === 'easy'
+      ? 'Easy: adding and taking away within 20, small numbers everywhere.'
+      : 'Within 100: two-digit numbers, half hours and bigger coins.');
+  }
+
+  function toggleMathTopic(id) {
+    const topic = POTIONS.topics.find((t) => t.id === id);
+    const on = POTIONS.topics.filter((t) => state.math.topics[t.id]);
+    if (on.length === 1 && on[0] === topic) {
+      renderParentMath('Keep at least one topic on, so there is a potion to brew.');
+      return;
+    }
+    state.math.topics[id] = !state.math.topics[id];
+    saveState();
+    renderParentMath(`${topic.name}: ${state.math.topics[id] ? 'on' : 'off'}.`);
+  }
+
   function renderParent() {
     wordInput.value = state.words.join('\n');
     renderParentWords();
+    renderParentMath();
     for (const btn of $$('#round-size .seg-btn')) {
       const chosen = Number(btn.dataset.size) === state.roundSize;
       btn.classList.toggle('is-chosen', chosen);
@@ -1093,8 +1525,8 @@
     sfxBtn.textContent = `Chimes: ${state.chimes ? 'on' : 'off'}`;
     sfxBtn.setAttribute('aria-pressed', String(state.chimes));
     const mastered = state.words.filter((w) => progressFor(w).mastered).length;
-    $('#parent-progress').textContent =
-      `${mastered} of ${plural(state.words.length, 'word')} mastered · ${plural(state.stars, 'star')} earned.`;
+    $('#parent-progress').textContent = `${mastered} of ${plural(state.words.length, 'word')} mastered · ` +
+      `${plural(state.math.brewed, 'potion')} brewed · ${plural(state.stars, 'star')} earned.`;
     resetArmed = 0;
     $('#btn-reset').textContent = 'Reset stars & progress';
     renderVoiceStatus();
@@ -1132,6 +1564,7 @@
       return;
     }
     state.progress = {};
+    state.math.brewed = 0;
     state.stars = 0;
     state.robe = DATA.robes[0].id;
     state.familiar = DATA.familiars[0].id;
@@ -1168,25 +1601,31 @@
   // ------------------------------------------------------------------
   // Wiring
   // ------------------------------------------------------------------
-  function begin() {
+  function begin(mode) {
     // This runs inside the tap, which is what lets Safari speak and chime.
+    const potions = mode === 'potions';
     chimes.unlock();
-    speech.say('Let’s cast some spells!', { rate: 0.95, pitch: 1.2 });
+    speech.say(potions ? 'Let’s brew some potions!' : 'Let’s cast some spells!', { rate: 0.95, pitch: 1.2 });
     speech.scheduleCheck();
-    startRound();
+    if (potions) startBrewRound();
+    else startRound();
   }
 
-  $('#btn-start').addEventListener('click', begin);
-  $('#btn-again').addEventListener('click', begin);
+  function quitRound() {
+    hideResult();
+    session = null;
+    show('home');
+  }
+
+  $('#btn-spells').addEventListener('click', () => begin('spells'));
+  $('#btn-potions').addEventListener('click', () => begin('potions'));
+  $('#btn-again').addEventListener('click', () => begin(session ? session.mode : 'spells'));
   $('#btn-wardrobe').addEventListener('click', () => show('wardrobe'));
   $('#btn-done-wardrobe').addEventListener('click', () => show('wardrobe'));
   $('#btn-book').addEventListener('click', () => show('book'));
   $('#btn-done-home').addEventListener('click', () => show('home'));
-  $('#btn-quit').addEventListener('click', () => {
-    hideResult();
-    session = null;
-    show('home');
-  });
+  $('#btn-quit').addEventListener('click', quitRound);
+  $('#btn-brew-quit').addEventListener('click', quitRound);
   for (const btn of $$('[data-go]')) btn.addEventListener('click', () => show(btn.dataset.go));
 
   tilesBox.addEventListener('click', (event) => {
@@ -1199,6 +1638,15 @@
   $('#btn-hear').addEventListener('click', () => sayWord());
   $('#btn-slow').addEventListener('click', () => sayWord({ slow: true }));
   $('#btn-peek').addEventListener('click', peek);
+
+  brewTiles.addEventListener('click', (event) => {
+    const btn = event.target.closest('.tile');
+    if (btn) tapDigit(btn.dataset.digit);
+  });
+  brewUndoBtn.addEventListener('click', brewUndo);
+  brewBtn.addEventListener('click', brewPotion);
+  $('#btn-brew-hear').addEventListener('click', () => sayProblem());
+  $('#btn-brew-slow').addEventListener('click', () => sayProblem({ slow: true }));
 
   $('#robe-picks').addEventListener('click', onPick);
   $('#familiar-picks').addEventListener('click', onPick);
@@ -1229,14 +1677,36 @@
     saveState();
     renderParent();
   });
+  $('#math-level').addEventListener('click', (event) => {
+    const btn = event.target.closest('.seg-btn');
+    if (btn) setMathLevel(btn.dataset.level);
+  });
+  $('#math-topics').addEventListener('click', (event) => {
+    const btn = event.target.closest('.toggle');
+    if (btn) toggleMathTopic(btn.dataset.topic);
+  });
 
   // A real keyboard (grown-up on a laptop) can play too. No text field is ever focused.
   document.addEventListener('keydown', (event) => {
-    if (activeScreen !== 'play' || event.metaKey || event.ctrlKey || event.altKey) return;
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
+    if (activeScreen !== 'play' && activeScreen !== 'brew') return;
     if (!resultBox.hidden) {
       if (event.key === 'Enter') {
         event.preventDefault();
         onNext();
+      }
+      return;
+    }
+    if (activeScreen === 'brew') {
+      if (!brew) return;
+      if (event.key === 'Backspace') {
+        event.preventDefault();
+        brewUndo();
+      } else if (event.key === 'Enter') {
+        event.preventDefault();
+        brewPotion();
+      } else if (/^[0-9]$/.test(event.key)) {
+        tapDigit(event.key);
       }
       return;
     }

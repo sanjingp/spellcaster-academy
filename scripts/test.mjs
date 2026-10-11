@@ -1,8 +1,10 @@
 // End-to-end test for Spellcaster Academy.
-// Plays the game the way a child would (taps only) at iPad sizes, in both
-// orientations, and saves screenshots to screenshots/.
+// Plays both modes — Spells (spelling) and Potions (math) — the way a child
+// would (taps only) at iPad sizes, in both orientations, and saves screenshots
+// to screenshots/.
 //
-//   npm test
+//   npm test              everything
+//   npm test -- potions   only the scenarios with "potions" in their name
 //
 // Uses WebKit when its browser is installed, otherwise Chromium.
 import fs from 'node:fs';
@@ -153,18 +155,23 @@ async function tap(page, selector) {
   await locator.waitFor({ state: 'visible' });
   const point = await locator.evaluate((node) => {
     if (node.disabled) return { error: 'it is disabled' };
-    let box = node.getBoundingClientRect();
-    if (box.top < 0 || box.bottom > window.innerHeight) {
+    const aim = () => {
+      const box = node.getBoundingClientRect();
+      const x = box.left + box.width / 2;
+      const y = box.top + box.height / 2;
+      const hit = document.elementFromPoint(x, y);
+      return { x, y, hit, ok: !!hit && (hit === node || node.contains(hit)) };
+    };
+    let at = aim();
+    if (!at.ok) {
+      // It may be off screen or scrolled out of sight inside a panel: scroll like a finger would.
       node.scrollIntoView({ block: 'center' });
-      box = node.getBoundingClientRect();
+      at = aim();
     }
-    const x = box.left + box.width / 2;
-    const y = box.top + box.height / 2;
-    const hit = document.elementFromPoint(x, y);
-    if (!hit || !(hit === node || node.contains(hit))) {
-      return { error: `it is covered by <${hit ? hit.tagName.toLowerCase() : 'nothing'} class="${hit ? hit.className : ''}">` };
+    if (!at.ok) {
+      return { error: `it is covered by <${at.hit ? at.hit.tagName.toLowerCase() : 'nothing'} class="${at.hit ? at.hit.className : ''}">` };
     }
-    return { x, y };
+    return { x: at.x, y: at.y };
   });
   if (point.error) throw new Error(`Cannot tap ${selector}: ${point.error}`);
   await page.touchscreen.tap(point.x, point.y);
@@ -224,13 +231,16 @@ async function readTurn(page, words) {
   }, words);
 }
 
-// Every tap target on the play screen must be big enough for small fingers,
-// on screen, and the rows must not overlap each other.
-async function checkPlayLayout(page, label) {
-  const report = await page.evaluate((minTap) => {
+const SPELL_ROWS = ['.topbar', '.stage', '#slots', '#tiles', '.actions'];
+const BREW_ROWS = ['.topbar', '.stage', '#brew-slots', '#brew-tiles', '.actions'];
+
+// Every tap target on a play screen (spells or potions) must be big enough for
+// small fingers, on screen, and the rows must not overlap each other.
+async function checkPlayLayout(page, label, root = '#screen-play', rowNames = SPELL_ROWS) {
+  const report = await page.evaluate(({ minTap, root, rowNames }) => {
     const problems = [];
     const visible = (node) => node.offsetParent !== null;
-    const targets = [...document.querySelectorAll('#screen-play button')].filter(visible);
+    const targets = [...document.querySelectorAll(`${root} button`)].filter(visible);
     for (const node of targets) {
       const box = node.getBoundingClientRect();
       const name = node.id || node.dataset.letter || node.className;
@@ -241,23 +251,23 @@ async function checkPlayLayout(page, label) {
         problems.push(`${name} is off screen`);
       }
     }
-    const rows = ['.topbar', '.stage', '#slots', '#tiles', '.actions']
-      .map((sel) => ({ sel, box: document.querySelector(`#screen-play ${sel}`).getBoundingClientRect() }));
+    const rows = rowNames
+      .map((sel) => ({ sel, box: document.querySelector(`${root} ${sel}`).getBoundingClientRect() }));
     rows.forEach((row, i) => {
       if (row.box.left < -0.5 || row.box.right > window.innerWidth + 0.5) problems.push(`${row.sel} is wider than the screen`);
       if (i && row.box.top < rows[i - 1].box.bottom - 1) {
         problems.push(`${row.sel} overlaps ${rows[i - 1].sel} by ${Math.round(rows[i - 1].box.bottom - row.box.top)}px`);
       }
     });
-    for (const slot of document.querySelectorAll('#slots .slot')) {
+    for (const slot of document.querySelectorAll(`${root} .slots > *`)) {
       const box = slot.getBoundingClientRect();
-      if (box.left < -0.5 || box.right > window.innerWidth + 0.5) { problems.push('a letter slot is off screen'); break; }
+      if (box.left < -0.5 || box.right > window.innerWidth + 0.5) { problems.push('an answer slot is off screen'); break; }
     }
     const last = rows[rows.length - 1].box;
     if (last.bottom > window.innerHeight + 0.5) problems.push('the Cast button row is below the screen');
     if (document.documentElement.scrollWidth > window.innerWidth + 1) problems.push('the page scrolls sideways');
     return problems;
-  }, MIN_TAP);
+  }, { minTap: MIN_TAP, root, rowNames });
   check(report.length === 0, `${label}: play screen layout is tidy`, report.slice(0, 4).join('; '));
 }
 
@@ -309,6 +319,29 @@ async function playTurn(page, words, { miss = false } = {}) {
   return { ...turn, kind };
 }
 
+// The main menu: two big buttons (Spells and Potions), with everything on screen.
+async function checkHome(page, label) {
+  const home = await page.evaluate(() => {
+    const box = (node) => node.getBoundingClientRect();
+    const modes = ['#btn-spells', '#btn-potions'].map((sel) => {
+      const node = document.querySelector(sel);
+      return { text: node.innerText.replace(/\s+/g, ' '), width: box(node).width, height: box(node).height };
+    });
+    const parts = [...document.querySelectorAll('#screen-home button, #screen-home .logo, #screen-home .witch')].map(box);
+    const fits = parts.every((b) => b.top >= 0 && b.left >= 0 && b.bottom <= window.innerHeight && b.right <= window.innerWidth);
+    const witch = box(document.querySelector('#screen-home .witch'));
+    const covered = [...document.querySelectorAll('#screen-home .home-actions button')].map(box)
+      .some((b) => b.left < witch.right && b.right > witch.left && b.top < witch.bottom - 6 && b.bottom > witch.top);
+    return { modes, fits, covered };
+  });
+  check(/Spells/.test(home.modes[0].text) && /Potions/.test(home.modes[1].text), `${label}: the main menu offers Spells and Potions`,
+    home.modes.map((m) => m.text).join(' | '));
+  check(home.modes.every((m) => m.width >= 200 && m.height >= 90), `${label}: both mode buttons are big`,
+    home.modes.map((m) => `${Math.round(m.width)}x${Math.round(m.height)}`).join(', '));
+  check(home.fits, `${label}: home screen fits on the iPad`);
+  check(!home.covered, `${label}: the home buttons do not cover the witch`);
+}
+
 // ---------------------------------------------------------------- scenario: the whole game
 
 async function fullGame(browser, browserName, baseUrl, size) {
@@ -320,20 +353,14 @@ async function fullGame(browser, browserName, baseUrl, size) {
   await sleep(500);
   await shot(page, `01-home-${tag}`);
   check(starter.length >= 10 && starter.length <= 14, `${tag}: starter list has about 12 words`, String(starter.length));
-  check((await spokenList(page)).length === 0, `${tag}: nothing is spoken before Start is tapped`);
-  const startBox = await page.locator('#btn-start').boundingBox();
-  check(startBox.width >= 200 && startBox.height >= 90, `${tag}: Start is a big button`, `${startBox.width}x${startBox.height}`);
-  const homeFits = await page.evaluate(() => {
-    const boxes = [...document.querySelectorAll('#screen-home button, #screen-home .logo')].map((n) => n.getBoundingClientRect());
-    return boxes.every((b) => b.top >= 0 && b.left >= 0 && b.bottom <= window.innerHeight && b.right <= window.innerWidth);
-  });
-  check(homeFits, `${tag}: home screen fits on the iPad`);
+  check((await spokenList(page)).length === 0, `${tag}: nothing is spoken before a mode button is tapped`);
+  await checkHome(page, tag);
 
   // ---- Start unlocks speech
-  await tap(page, '#btn-start');
+  await tap(page, '#btn-spells');
   await page.waitForSelector('#screen-play:not([hidden])');
   let spoken = await spokenList(page);
-  check(spoken.length >= 2, `${tag}: speechSynthesis.speak was called after tapping Start`, `calls: ${spoken.length}`);
+  check(spoken.length >= 2, `${tag}: speechSynthesis.speak was called after tapping Spells`, `calls: ${spoken.length}`);
   const firstWord = spoken.find((s) => starter.includes(s.text));
   check(!!firstWord, `${tag}: the first spelling word is spoken`);
   if (firstWord) {
@@ -571,7 +598,7 @@ async function fullGame(browser, browserName, baseUrl, size) {
   await shot(page, `08-home-after-playing-${tag}`);
 
   // ---- the next round uses the custom list (including an apostrophe word)
-  await tap(page, '#btn-start');
+  await tap(page, '#btn-spells');
   await page.waitForSelector('#screen-play:not([hidden])');
   turn = await readTurn(page, custom);
   check(custom.includes(turn.word), `${tag}: the next round uses the custom words`, String(turn.word));
@@ -601,7 +628,7 @@ async function tightLayouts(browser, baseUrl) {
     for (const item of cases) {
       const saved = { words: [item.word], custom: true, progress: { [item.word]: { step: item.step, mastered: 0, best: 0, last: 0 } } };
       const { context, page, problems } = await openPage(browser, baseUrl, size, { saved });
-      await tap(page, '#btn-start');
+      await tap(page, '#btn-spells');
       await page.waitForSelector('#screen-play:not([hidden])');
       const turn = await readTurn(page, [item.word]);
       check(turn.step === item.step, `${size.name}: saved step is used (${item.label})`, String(turn.step));
@@ -635,7 +662,7 @@ async function withoutSpeech(browser, baseUrl) {
   const saved = { words: ['magic'], custom: true, progress: { magic: { step: 3, mastered: 0, best: 0, last: 0 } } };
   const { context, page, problems } = await openPage(browser, baseUrl, size, { speech: 'none', saved });
   check(await isShowing(page, '#screen-home [data-speech-note]'), 'no speech: home shows a friendly note');
-  await tap(page, '#btn-start');
+  await tap(page, '#btn-spells');
   await page.waitForSelector('#screen-play:not([hidden])');
   check(await isShowing(page, '#screen-play [data-speech-note]'), 'no speech: play screen shows a friendly note');
   check(!(await isShowing(page, '#btn-hear')), 'no speech: the Hear button is hidden');
@@ -662,7 +689,7 @@ async function withoutSpeech(browser, baseUrl) {
   // The browser's own speech engine, untouched. Headless browsers usually have
   // no voices, which should switch the game to peeking after a moment.
   const real = await openPage(browser, baseUrl, size, { speech: 'real', saved });
-  await tap(real.page, '#btn-start');
+  await tap(real.page, '#btn-spells');
   await real.page.waitForSelector('#screen-play:not([hidden])');
   await sleep(1700);
   const voices = await real.page.evaluate(() => ('speechSynthesis' in window && window.speechSynthesis ? window.speechSynthesis.getVoices().length : -1));
@@ -683,7 +710,7 @@ async function calmMode(browser, baseUrl) {
   const starter = await page.evaluate(() => window.SPELLCASTER_DATA.starterWords.slice());
   const running = () => page.evaluate(() => document.getAnimations().filter((a) => a.playState === 'running').length);
   check((await running()) === 0, 'reduced motion: nothing animates on the home screen', String(await running()));
-  await tap(page, '#btn-start');
+  await tap(page, '#btn-spells');
   await page.waitForSelector('#screen-play:not([hidden])');
   await sleep(200);
   check((await running()) === 0, 'reduced motion: nothing animates on the play screen', String(await running()));
@@ -698,6 +725,787 @@ async function calmMode(browser, baseUrl) {
   await context.close();
 }
 
+// ---------------------------------------------------------------- potions: reading the brew screen
+
+async function readBrew(page) {
+  return page.evaluate(() => {
+    const box = document.querySelector('#brew-problem');
+    const texts = (sel, root = box) => [...root.querySelectorAll(sel)].map((node) => node.textContent.trim());
+    const turnOf = (sel) => {
+      const hand = box.querySelector(sel);
+      const match = /rotate\(([-\d.]+)/.exec(hand ? hand.getAttribute('transform') : '');
+      return match ? Number(match[1]) : null;
+    };
+    const focus = document.activeElement;
+    return {
+      topic: document.querySelector('#screen-brew').dataset.topic,
+      show: box.dataset.show,
+      title: document.querySelector('#brew-title').textContent.trim(),
+      equation: texts('.eq > span'),
+      rods: box.querySelectorAll('.pv-rod').length,
+      cubes: box.querySelectorAll('.pv-cube').length,
+      sequence: texts('.seq-item'),
+      story: texts('.story-line').join(' '),
+      hourTurn: turnOf('.clock-hour'),
+      minuteTurn: turnOf('.clock-minute'),
+      coins: [...box.querySelectorAll('.coin')].map((node) => Number(node.dataset.cents)),
+      coinLabels: texts('.coin'),
+      slots: texts('.slot', document.querySelector('#brew-slots')),
+      marks: texts('.slot-mark', document.querySelector('#brew-slots')),
+      tiles: [...document.querySelectorAll('#brew-tiles .tile')].map((tile) => tile.dataset.digit),
+      brewReady: !document.querySelector('#btn-brew').disabled,
+      undoReady: !document.querySelector('#btn-brew-undo').disabled,
+      focus: focus ? focus.tagName : '',
+    };
+  });
+}
+
+// Works out the answer from what is on the screen, the way a child would.
+// It never looks at the game's own answer, so it also checks the game's math.
+//   digits  – the tiles to tap          wrong   – tiles for a wrong answer
+//   solved  – what the result card must show     numbers – every number in the problem
+function solveBrew(seen) {
+  const pad = (n) => String(n).padStart(2, '0');
+  let answer = NaN;
+  let numbers = [];
+  let solved = null;
+  if (seen.show === 'equation') {
+    const [left, op, right] = seen.equation;
+    const a = parseInt(left, 10);
+    const b = parseInt(right, 10);
+    if (op === '+') answer = a + b;
+    if (op === '−') answer = a - b;
+    if (op === 'and') answer = a * 10 + b; // "4 tens and 7 ones"
+    numbers = op === 'and' ? [answer] : [a, b, answer];
+    solved = new RegExp(`(=|make) ${answer}$`);
+  } else if (seen.show === 'number') {
+    const [, place, n] = /^How many (tens|ones) are in (\d+)\?$/.exec(seen.title) || [];
+    answer = place === 'tens' ? Math.floor(n / 10) : n % 10;
+    numbers = [Number(n)];
+    solved = new RegExp(`^${n} has ${answer} (ten|one)s?$`);
+  } else if (seen.show === 'blocks') {
+    answer = seen.rods * 10 + seen.cubes;
+    numbers = [answer];
+    solved = new RegExp(`make ${answer}$`);
+  } else if (seen.show === 'sequence') {
+    const first = Number(seen.sequence[0]);
+    const step = Number(seen.sequence[1]) - first;
+    numbers = seen.sequence.map((_, i) => first + i * step);
+    answer = numbers[seen.sequence.indexOf('?')];
+    solved = new RegExp(`^${numbers.join(', ')}$`);
+  } else if (seen.show === 'story') {
+    const [a, b] = seen.story.match(/\d+/g).map(Number);
+    answer = /left\?$/.test(seen.story) ? a - b : a + b;
+    numbers = [a, b, answer];
+    solved = new RegExp(`= ${answer}$`);
+  } else if (seen.show === 'clock') {
+    const hour = Math.floor(seen.hourTurn / 30) || 12;
+    const minute = Math.round(seen.minuteTurn / 6);
+    return {
+      digits: `${hour}${pad(minute)}`,
+      wrong: `${hour}${minute ? '00' : '30'}`,
+      solved: new RegExp(`^${hour}:${pad(minute)}$`),
+      numbers: [hour, minute],
+    };
+  } else if (seen.show === 'coins') {
+    answer = seen.coins.reduce((sum, cents) => sum + cents, 0);
+    numbers = seen.coins.concat(answer);
+    solved = new RegExp(`= ${answer}¢$`);
+  }
+  return { digits: String(answer), wrong: String(answer + 1), solved, numbers };
+}
+
+// Two turns show the same problem if everything on screen is the same.
+const brewId = (seen) => JSON.stringify([seen.topic, seen.show, seen.title, seen.equation, seen.rods, seen.cubes,
+  seen.sequence, seen.story, seen.hourTurn, seen.minuteTurn, seen.coins]);
+
+// The picture of the problem (sum, blocks, clock, coins, story ...) must sit
+// inside its card, below the title, and be big enough to read.
+async function checkBrewPicture(page, label) {
+  const report = await page.evaluate(() => {
+    const problems = [];
+    const card = document.querySelector('#screen-brew .prompt-card').getBoundingClientRect();
+    const box = document.querySelector('#brew-problem');
+    const title = document.querySelector('#screen-brew .prompt-title').getBoundingClientRect();
+    const inside = (node, name) => {
+      const b = node.getBoundingClientRect();
+      if (b.width < 4 || b.height < 4) problems.push(`${name} is too small to see`);
+      if (b.left < card.left - 0.5 || b.right > card.right + 0.5 || b.top < card.top - 0.5 || b.bottom > card.bottom + 0.5) {
+        problems.push(`${name} spills out of the card`);
+      }
+      if (b.top < title.bottom - 1) problems.push(`${name} overlaps the title`);
+    };
+    const parts = box.querySelectorAll('.eq > span, .pv-rod, .pv-cube, .seq-item, .story-line, .story-emoji, .clock-svg, .coin');
+    if (!parts.length) problems.push('nothing is drawn');
+    for (const node of parts) inside(node, node.getAttribute('class'));
+    const picture = box.getBoundingClientRect();
+    for (const btn of document.querySelectorAll('#brew-listen:not([hidden]) button')) {
+      inside(btn, btn.id);
+      const b = btn.getBoundingClientRect();
+      for (const node of parts) {
+        const p = node.getBoundingClientRect();
+        if (p.left < b.right && p.right > b.left && p.top < b.bottom && p.bottom > b.top) {
+          problems.push(`${btn.id} covers the picture`);
+          break;
+        }
+      }
+    }
+    if (title.left < card.left || title.right > card.right) problems.push('the title is wider than the card');
+    if (card.left < 0 || card.right > window.innerWidth) problems.push('the card is off screen');
+    const text = box.querySelector('.story-text, .eq, .seq-item, .coin');
+    if (text && parseFloat(getComputedStyle(text).fontSize) < 16) problems.push('the writing is tiny');
+    if (picture.height < 140) problems.push(`the picture box is only ${Math.round(picture.height)}px tall`);
+    return [...new Set(problems)];
+  });
+  check(report.length === 0, `${label}: the problem picture fits in its card`, report.slice(0, 4).join('; '));
+}
+
+async function tapDigits(page, digits) {
+  for (const digit of digits) await tap(page, `#brew-tiles .tile[data-digit="${digit}"]`);
+}
+
+async function brewAndSeeResult(page) {
+  await tap(page, '#btn-brew');
+  await page.waitForSelector('#result:not([hidden])');
+  return page.getAttribute('#result', 'data-kind');
+}
+
+const resultCardFits = (page) => page.evaluate(() => {
+  const card = document.querySelector('.result-card').getBoundingClientRect();
+  const next = document.querySelector('#btn-next').getBoundingClientRect();
+  const word = document.querySelector('#result-word').getBoundingClientRect();
+  return card.top >= 0 && card.bottom <= window.innerHeight && next.bottom <= card.bottom + 1 && next.top > card.top &&
+    next.height >= 60 && word.left >= card.left && word.right <= card.right;
+});
+
+// The round-complete card must fit, with "Play again" reachable without scrolling.
+const donePanelFits = (page) => page.evaluate(() => {
+  const panel = document.querySelector('#screen-done .panel').getBoundingClientRect();
+  const again = document.querySelector('#btn-again').getBoundingClientRect();
+  return panel.top >= 0 && panel.bottom <= window.innerHeight && again.top >= panel.top && again.bottom <= panel.bottom &&
+    again.bottom <= window.innerHeight && again.height >= 60;
+});
+
+// ---------------------------------------------------------------- scenario: potion recipes
+
+const ALL_TOPICS = ['add', 'sub', 'place', 'skip', 'story', 'time', 'coins'];
+
+// Thousands of generated problems, checked against the rules for each level.
+// (Fast: the recipes are plain functions, so no tapping is needed.)
+async function potionRecipes(browser, baseUrl) {
+  const { context, page, problems } = await openPage(browser, baseUrl, SIZES[0]);
+  const data = await page.evaluate(() => {
+    const P = window.SPELLCASTER_POTIONS;
+    const samples = {};
+    for (const level of P.levels) {
+      for (const topic of P.topics) {
+        samples[`${topic.id}/${level}`] = Array.from({ length: 400 }, () => P.makeProblem(topic.id, level));
+      }
+    }
+    const only = (ids) => Object.fromEntries(P.topics.map((t) => [t.id, ids.includes(t.id)]));
+    const everything = P.topics.map((t) => t.id);
+    const rounds = (settings) => Array.from({ length: 40 }, () => P.makeRound(settings, 8).map((p) => ({ topic: p.topic, key: p.key })));
+    return {
+      levels: P.levels,
+      topics: P.topics,
+      samples,
+      roundsAll: rounds({ level: 'hundred', topics: only(everything) }),
+      roundsSub: rounds({ level: 'easy', topics: only(['sub']) }),
+      roundsTime: rounds({ level: 'easy', topics: only(['time']) }),
+      roundsNone: rounds({ level: 'easy', topics: only([]) }),
+      brews: P.brews,
+      cheers: P.cheers,
+      fizzles: P.fizzles,
+      storyCount: P.stories.length,
+    };
+  });
+
+  check(JSON.stringify(data.levels) === JSON.stringify(['easy', 'hundred']), 'recipes: two math levels (easy within 20, within 100)');
+  check(JSON.stringify(data.topics.map((t) => t.id)) === JSON.stringify(ALL_TOPICS), 'recipes: all the topics are there',
+    data.topics.map((t) => t.id).join(','));
+  check(data.topics.every((t) => t.name && t.icon && /^#[0-9a-f]{6}$/.test(t.color)), 'recipes: every topic has a name, icon and potion color');
+
+  // Turns a recipe into what readBrew() would see on screen, so the same solver checks both.
+  const asSeen = (problem) => {
+    const show = problem.show;
+    return {
+      topic: problem.topic,
+      show: show.type,
+      title: problem.title,
+      equation: show.parts || [],
+      rods: show.tens,
+      cubes: show.ones,
+      sequence: (show.items || []).map((n) => (n === null ? '?' : String(n))),
+      story: (show.lines || []).join(' '),
+      hourTurn: show.type === 'clock' ? (show.hour % 12) * 30 + show.minute / 2 : null,
+      minuteTurn: show.type === 'clock' ? show.minute * 6 : null,
+      coins: show.cents || [],
+    };
+  };
+
+  for (const [name, list] of Object.entries(data.samples)) {
+    const [topic, level] = name.split('/');
+    const easy = level === 'easy';
+    const bad = [];
+    const note = (problem, why) => { if (bad.length < 3) bad.push(`${problem.key}: ${why}`); };
+    for (const problem of list) {
+      const seen = asSeen(problem);
+      const want = solveBrew(seen);
+      const show = problem.show;
+      const solvedText = problem.solved.join('');
+      if (problem.topic !== topic) note(problem, 'wrong topic');
+      if (want.digits !== problem.answer) note(problem, `answer ${problem.answer}, but the screen says ${want.digits}`);
+      if (!/^\d+$/.test(problem.answer)) note(problem, 'answer is not digits');
+      if (problem.format === 'time' ? !/^\d{3,4}$/.test(problem.answer) : problem.answer.length > 3) note(problem, 'answer is too long to tap');
+      if (!want.solved || !want.solved.test(solvedText)) note(problem, `result card shows "${solvedText}"`);
+      if (!problem.title || problem.title.length > 26) note(problem, `title "${problem.title}"`);
+      if (!problem.say || problem.say.length < 12) note(problem, 'nothing to read aloud');
+      if (!problem.sayAnswer || !problem.label || problem.label.length > 30) note(problem, `label "${problem.label}"`);
+      if (want.numbers.some((n) => !Number.isInteger(n) || n < 0 || n > 100)) note(problem, `numbers ${want.numbers.join(',')}`);
+
+      if (topic === 'add' || topic === 'sub' || topic === 'story') {
+        if (easy && want.numbers.some((n) => n > 20)) note(problem, 'easy level must stay within 20');
+        if (want.numbers[0] < 1 || want.numbers[1] < 1) note(problem, 'adds or takes away nothing');
+      }
+      if (topic === 'place' && (want.numbers[0] < 10 || (easy && want.numbers[0] > 20))) note(problem, 'place value number out of range');
+      if (topic === 'skip') {
+        const step = want.numbers[1] - want.numbers[0];
+        const blank = show.items.indexOf(null);
+        if (![2, 5, 10].includes(step)) note(problem, `counts by ${step}`);
+        if (show.items.length !== 5 || show.items.filter((n) => n === null).length !== 1 || blank < 2) note(problem, 'needs one blank after two numbers');
+        if (easy && (blank !== 4 || want.numbers[0] % step !== 0 || (step === 2 && want.numbers[4] > 20))) note(problem, 'easy skip counting should start low and ask what is next');
+        if (!problem.title.includes(`${step}s`) || !problem.say.includes('blank')) note(problem, 'does not say what to count by');
+      }
+      if (topic === 'story') {
+        if (!/\?$/.test(seen.story) || seen.story.length > 100 || show.lines.length !== 3) note(problem, `story "${seen.story}"`);
+        if (problem.say !== seen.story) note(problem, 'story is not read aloud word for word');
+        if (want.numbers[0] < 2 || want.numbers[1] < 2) note(problem, 'story numbers must be 2 or more (plurals)');
+        if (/kill|dead|die|blood|hate|stupid|dumb|scar|hurt|gun|fight/i.test(seen.story)) note(problem, 'story is not kid-safe');
+      }
+      if (topic === 'time') {
+        if (show.hour < 1 || show.hour > 12 || ![0, 30].includes(show.minute)) note(problem, 'not an hour or half hour');
+        if (easy && show.minute !== 0) note(problem, 'easy level is on the hour only');
+        if (problem.format !== 'time') note(problem, 'clock answers need h:mm boxes');
+      }
+      if (topic === 'coins') {
+        if (show.cents.some((c) => ![1, 5, 10, 25].includes(c)) || show.cents.length < 2 || show.cents.length > 6) note(problem, `coins ${show.cents}`);
+        if (easy && (want.numbers[want.numbers.length - 1] > 20 || show.cents.includes(25))) note(problem, 'easy coins must stay within 20 cents');
+        if (problem.unit !== '¢') note(problem, 'no cent sign');
+        if (show.cents.some((c, i) => i && c > show.cents[i - 1])) note(problem, 'coins are not sorted big to small');
+      }
+    }
+    check(bad.length === 0, `recipes: ${list.length} ${level} "${topic}" problems are correct and in range`, bad.join(' | '));
+    const kinds = new Set(list.map((problem) => problem.key)).size;
+    check(kinds >= 10, `recipes: ${level} "${topic}" has plenty of different problems`, `${kinds} kinds`);
+  }
+
+  // Within 100 really is harder than easy: two-digit sums, regrouping, half hours, quarters.
+  const hundred = (topic) => data.samples[`${topic}/hundred`];
+  const parts = (problem) => problem.show.parts.map((part) => parseInt(part, 10));
+  check(hundred('add').some((p) => Number(p.answer) > 50), 'recipes: within 100 has sums past 50');
+  check(hundred('add').some((p) => (parts(p)[0] % 10) + (parts(p)[2] % 10) >= 10) &&
+    hundred('add').some((p) => (parts(p)[0] % 10) + (parts(p)[2] % 10) < 10), 'recipes: within 100 adds with and without regrouping');
+  check(hundred('sub').some((p) => parts(p)[0] % 10 < parts(p)[2] % 10) && hundred('sub').some((p) => parts(p)[0] > 50),
+    'recipes: within 100 takes away with regrouping');
+  check(hundred('time').some((p) => p.show.minute === 30) && hundred('time').some((p) => p.show.minute === 0),
+    'recipes: within 100 tells time to the hour and half hour');
+  check(hundred('coins').some((p) => p.show.cents.includes(25)), 'recipes: within 100 uses quarters');
+  check(hundred('story').some((p) => /left\?$/.test(p.say)) && hundred('story').some((p) => !/left\?$/.test(p.say)),
+    'recipes: stories both add and take away');
+  check(new Set(hundred('story').map((p) => p.key.split(':')[1])).size === data.storyCount && data.storyCount >= 8,
+    'recipes: every story template is used', String(data.storyCount));
+  for (const form of ['blocks', 'equation', 'number']) {
+    check(hundred('place').some((p) => p.show.type === form), `recipes: place value includes the "${form}" form`);
+  }
+  for (const step of [2, 5, 10]) {
+    check(hundred('skip').some((p) => p.title === `Count by ${step}s`), `recipes: skip counting by ${step}s`);
+  }
+
+  // Rounds: the right size, spread over the chosen topics, no repeats.
+  const roundOk = (round, topics) => round.length === 8 && round.every((p) => topics.includes(p.topic)) &&
+    new Set(round.map((p) => p.key)).size === 8;
+  check(data.roundsAll.every((round) => roundOk(round, ALL_TOPICS) && ALL_TOPICS.every((t) => round.some((p) => p.topic === t))),
+    'recipes: a round has 8 different potions and uses every topic that is on');
+  check(data.roundsSub.every((round) => roundOk(round, ['sub'])), 'recipes: a round only uses the topics that are switched on');
+  check(data.roundsTime.every((round) => roundOk(round, ['time'])), 'recipes: even a tiny topic fills a round without repeats');
+  check(data.roundsNone.every((round) => roundOk(round, ['add'])), 'recipes: with no topic chosen, a round still has potions');
+
+  // Brew results: silly, kind and kid-safe.
+  check(data.brews.length >= 12 && data.brews.every((b) => b.main && /^Your potion made .+!$/.test(b.say)),
+    'recipes: plenty of silly brew results', String(data.brews.length));
+  const words = data.brews.map((b) => b.say).concat(data.fizzles, data.cheers).join(' ');
+  check(!/kill|dead|die|blood|hate|stupid|dumb|scar|hurt|gun|fight|wrong|bad|fail/i.test(words), 'recipes: brew results and fizzle words are kid-safe and never scold');
+  check(data.fizzles.length >= 3 && data.cheers.length >= 4, 'recipes: a few different cheers and gentle fizzle lines');
+  check(problems.length === 0, 'recipes: no errors in the browser console', problems.slice(0, 3).join(' | '));
+  await context.close();
+}
+
+// ---------------------------------------------------------------- scenario: a whole round of potions
+
+async function potionsRound(browser, baseUrl, size) {
+  const tag = `potions ${size.name}`;
+  const file = size.name;
+  // Four stars are already saved, as if earned in Spells: potion stars must add to them.
+  const { context, page, problems, requests } = await openPage(browser, baseUrl, size, { saved: { stars: 4 } });
+
+  // ---- main menu
+  await sleep(400);
+  await checkHome(page, tag);
+  check((await spokenList(page)).length === 0, `${tag}: nothing is spoken before a mode button is tapped`);
+
+  // ---- the Potions button starts a round and unlocks speech
+  await tap(page, '#btn-potions');
+  await page.waitForSelector('#screen-brew:not([hidden])');
+  check(!(await isShowing(page, '#screen-play')), `${tag}: Potions opens the brewing screen, not the spelling one`);
+  let spoken = await spokenList(page);
+  check(spoken.length >= 2, `${tag}: speechSynthesis.speak was called after tapping Potions`, `calls: ${spoken.length}`);
+  const prompt = spoken[spoken.length - 1];
+  check(prompt.text.length > 12 && /\?$/.test(prompt.text), `${tag}: the first problem is read aloud`, prompt.text);
+  check(Math.abs(prompt.rate - 0.85) < 0.01 && prompt.voice === 'Samantha' && prompt.lang === 'en-US',
+    `${tag}: problems are read by a clear en-US voice at rate ~0.85`, `${prompt.rate} ${prompt.voice} ${prompt.lang}`);
+
+  // ---- hear it again / slowly
+  let before = spoken.length;
+  await tap(page, '#btn-brew-hear');
+  await tap(page, '#btn-brew-slow');
+  spoken = await spokenList(page);
+  check(spoken.length === before + 2 && spoken[before].text === prompt.text && spoken[before + 1].text === prompt.text,
+    `${tag}: "Hear it again" and "Slowly" both read the problem`);
+  check(spoken[before + 1].rate < 0.7, `${tag}: "Slowly" reads slower`, String(spoken[before + 1].rate));
+
+  // ---- number tiles, undo and brew
+  let seen = await readBrew(page);
+  check(seen.tiles.slice().sort().join('') === '0123456789' && seen.tiles.length === 10, `${tag}: there are number tiles 0 to 9`, seen.tiles.join(''));
+  check(!seen.brewReady, `${tag}: Brew is disabled until a number is tapped`);
+  check(!seen.undoReady, `${tag}: Undo is disabled when nothing is typed`);
+  await tap(page, '#brew-tiles .tile[data-digit="7"]');
+  let after = await readBrew(page);
+  check(after.slots.filter((ch) => ch).join('') === '7' && after.undoReady, `${tag}: tapping a number tile types it`, after.slots.join('|'));
+  await tap(page, '#btn-brew-undo');
+  after = await readBrew(page);
+  check(after.slots.every((ch) => !ch) && !after.undoReady && !after.brewReady, `${tag}: Undo erases the number`);
+  await tapDigits(page, '1234');
+  after = await readBrew(page);
+  const room = seen.show === 'clock' ? solveBrew(seen).digits.length : 3;
+  check(after.slots.filter((ch) => ch).length === room, `${tag}: an answer cannot be longer than its boxes`, after.slots.join('|'));
+  for (let i = 0; i < room; i++) await tap(page, '#btn-brew-undo');
+  const inputs = await page.evaluate(() => [...document.querySelectorAll('input, textarea, [contenteditable]')]
+    .filter((node) => node.offsetParent !== null).length);
+  check(inputs === 0, `${tag}: there is no text field on the brewing screen`);
+
+  // ---- brew the whole round: the first two potions are missed on purpose
+  const history = new Set();
+  const missedAt = new Map(); // problem -> turn number of its miss
+  const retried = new Set();  // problems that were missed once
+  const topics = new Set();
+  const kinds = new Set();
+  let turnNo = 0;
+  let brewed = 0;
+  let stars = 0;
+  let returned = 0;
+  let gifts = 0;
+
+  while (!(await isShowing(page, '#screen-done'))) {
+    turnNo += 1;
+    if (turnNo > 30) throw new Error('The potion round never finished');
+    seen = await readBrew(page);
+    const want = solveBrew(seen);
+    const id = brewId(seen);
+    const what = `turn ${turnNo} (${seen.topic})`;
+    check(/^\d{1,4}$/.test(want.digits), `${tag}: ${what} can be solved from what is on screen`, want.digits);
+    check(want.numbers.every((n) => n >= 0 && n <= 100), `${tag}: ${what} stays within 100`, want.numbers.join(','));
+    check(seen.focus !== 'INPUT' && seen.focus !== 'TEXTAREA', `${tag}: no text field is focused while brewing`, seen.focus);
+    check(ALL_TOPICS.includes(seen.topic), `${tag}: ${what} is a known topic`);
+    spoken = await spokenList(page);
+    const said = spoken[spoken.length - 1].text;
+    if (seen.show === 'story') check(said === seen.story, `${tag}: the story problem is read aloud word for word`, said);
+    else check(said.length > 12, `${tag}: ${what} is read aloud`, said);
+    if (seen.show === 'coins') {
+      check(seen.marks.join('') === '¢' && seen.coinLabels.every((text, i) => text === `${seen.coins[i]}¢`), `${tag}: coins show their value and the answer has a cent sign`);
+    }
+    if (seen.show === 'clock') {
+      check(seen.marks.join('') === ':' && seen.slots.length === want.digits.length, `${tag}: the clock answer has h:mm boxes`, `${seen.slots.length} boxes`);
+    }
+
+    if (missedAt.has(id)) {
+      const gap = turnNo - missedAt.get(id) - 1;
+      check(gap >= 2 && gap <= 4, `${tag}: a missed potion comes back a few turns later`, `came back after ${gap} other turn(s)`);
+      missedAt.delete(id);
+      returned += 1;
+    } else {
+      check(!history.has(id), `${tag}: no potion shows up twice unless it was missed`, id);
+    }
+    history.add(id);
+
+    if (!topics.has(seen.topic)) {
+      topics.add(seen.topic);
+      await checkPlayLayout(page, `${tag} ${seen.topic}`, '#screen-brew', BREW_ROWS);
+      await checkBrewPicture(page, `${tag} ${seen.topic}`);
+      // Screenshot with the answer typed in, like a game in progress.
+      await tapDigits(page, want.digits);
+      await sleep(350);
+      await shot(page, `12-potions-${seen.topic}-${file}`);
+      for (let i = 0; i < want.digits.length; i++) await tap(page, '#btn-brew-undo');
+    }
+
+    const miss = turnNo <= 2;
+    await tapDigits(page, miss ? want.wrong : want.digits);
+    const kind = await brewAndSeeResult(page);
+    const shown = await page.locator('#result-word').getAttribute('aria-label');
+    check(want.solved.test(shown), `${tag}: the result card shows the finished sum for ${what}`, String(shown));
+    if (miss) {
+      check(kind === 'fizzle', `${tag}: a wrong answer gently fizzles`, kind);
+      missedAt.set(id, turnNo);
+      retried.add(id);
+      const fizzleText = (await page.locator('.result-card').innerText()).replace(/\s+/g, ' ');
+      check(/potion fizzled/i.test(fizzleText) && /try it again/i.test(fizzleText), `${tag}: fizzle message is kind`, fizzleText);
+      check(!/[✗✘❌]|wrong|bad|fail/i.test(fizzleText), `${tag}: fizzle message never shames`, fizzleText);
+      spoken = await spokenList(page);
+      check(/fizzled/i.test(spoken[spoken.length - 1].text) && /try it again/i.test(spoken[spoken.length - 1].text),
+        `${tag}: the fizzle is spoken kindly, with the answer`, spoken[spoken.length - 1].text);
+      check((await page.locator('#brew-progress .rp-star.is-done').count()) === brewed, `${tag}: a fizzle does not fill a progress star`);
+    } else {
+      check(kind === 'brewed', `${tag}: the right answer brews the potion for ${what}`, kind);
+      const earned = retried.has(id) ? 1 : 2;
+      brewed += 1;
+      stars += earned;
+      check((await page.locator('#result-stars .big-star.is-won').count()) === earned,
+        `${tag}: ${retried.has(id) ? 'a potion brewed on the second try earns 1 star' : 'a first-try potion earns 2 stars'}`);
+      check((await page.locator('#brew-progress .rp-star.is-done').count()) === brewed, `${tag}: the progress stars fill up`);
+      check((await page.locator('#screen-brew [data-stars]').innerText()).trim() === String(4 + stars), `${tag}: the star count goes up`);
+      const sillyText = await page.locator('#result-text').innerText();
+      check(/^Your potion made .+!$/.test(sillyText), `${tag}: a brewed potion has a silly result`, sillyText);
+      if (/New:/.test(await page.locator('#result-extra').innerText())) gifts += 1;
+    }
+    if (!kinds.has(kind)) {
+      kinds.add(kind);
+      await sleep(kind === 'brewed' ? 1100 : 700);
+      await shot(page, `13-potions-result-${kind}-${file}`);
+      check(await resultCardFits(page), `${tag}: the ${kind} card fits on screen`);
+    }
+    await tapNext(page);
+  }
+
+  check(brewed === 8, `${tag}: a round brews 8 potions`, String(brewed));
+  check(turnNo === 10 && returned === 2, `${tag}: both missed potions came back and were brewed`, `${turnNo} turns, ${returned} returned`);
+  check(topics.size === ALL_TOPICS.length, `${tag}: every topic showed up in the round`, [...topics].join(','));
+  check(gifts >= 1, `${tag}: a brewed potion announces a newly unlocked reward`);
+
+  // ---- round complete: stars are shared with spelling, rewards unlock
+  await sleep(900);
+  await shot(page, `14-potions-complete-${file}`);
+  check(stars === 14, `${tag}: 6 first-try potions and 2 retried ones earn 14 stars`, String(stars));
+  let saved = await readSaved(page);
+  check(saved.stars === 4 + stars, `${tag}: potion stars are added to the shared star count and saved`, `${saved.stars} vs ${4 + stars}`);
+  check(saved.math.brewed === 8, `${tag}: brewed potions are counted in localStorage`, String(saved.math.brewed));
+  check(/potions/i.test(await page.locator('#done-title').innerText()), `${tag}: the round-complete card is about potions`);
+  check((await page.locator('#done-summary').innerText()).includes(`8 potions and earned ${stars} stars`), `${tag}: round summary shows potions and stars`);
+  check((await page.locator('#done-words .done-word').count()) === 8, `${tag}: the summary lists all 8 potions`);
+  const unlockText = await page.locator('#done-unlocks').innerText();
+  check(/Bubblegum Pink/.test(unlockText) && /Hoot the owl/.test(unlockText) && /Mermaid Teal/.test(unlockText),
+    `${tag}: potion stars unlock robes and familiars`, unlockText);
+  check(await donePanelFits(page), `${tag}: the round-complete card fits, with Play again in reach`);
+
+  // ---- rewards are shared: a robe earned with potions can be worn
+  await tap(page, '#btn-done-wardrobe');
+  await page.waitForSelector('#screen-wardrobe:not([hidden])');
+  await tap(page, '.pick[data-kind="robe"][data-id="mermaid"]');
+  saved = await readSaved(page);
+  check(saved.robe === 'mermaid', `${tag}: a robe unlocked with potion stars can be picked`, saved.robe);
+  await tap(page, '#screen-wardrobe [data-go="home"]');
+
+  // ---- home shows the shared stars; Spells still works and shows them too
+  await page.waitForSelector('#screen-home:not([hidden])');
+  await sleep(1400); // let the wardrobe sparkles finish
+  await shot(page, `16-home-after-potions-${file}`);
+  check((await page.locator('#screen-home [data-stars]').innerText()).trim() === String(4 + stars), `${tag}: home shows the shared stars`);
+  check(/8 potions brewed/.test(await page.locator('#btn-potions').innerText()), `${tag}: home shows how many potions were brewed`);
+  await tap(page, '#btn-spells');
+  await page.waitForSelector('#screen-play:not([hidden])');
+  check((await page.locator('#screen-play [data-stars]').innerText()).trim() === String(4 + stars), `${tag}: Spells shows the same stars`);
+  check(!(await isShowing(page, '#screen-brew')), `${tag}: Spells opens the spelling screen`);
+  await tap(page, '#btn-quit');
+  await page.waitForSelector('#screen-home:not([hidden])');
+
+  // ---- quitting a potion round and starting again
+  await tap(page, '#btn-potions');
+  await page.waitForSelector('#screen-brew:not([hidden])');
+  check((await page.locator('#brew-progress .rp-star').count()) === 8 && (await page.locator('#brew-progress .rp-star.is-done').count()) === 0,
+    `${tag}: a new round starts with 8 empty progress stars`);
+  await tap(page, '#btn-brew-quit');
+  await page.waitForSelector('#screen-home:not([hidden])');
+  check(!(await isShowing(page, '#result')), `${tag}: the home button leaves the round`);
+
+  // ---- everything survives a reload
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForSelector('#screen-home:not([hidden])');
+  saved = await readSaved(page);
+  check(saved.stars === 4 + stars && saved.math.brewed === 8 && saved.robe === 'mermaid', `${tag}: stars, potions and robe survive a reload`);
+
+  const offsite = requests.filter((url) => !url.startsWith(baseUrl) && !url.startsWith('data:'));
+  check(offsite.length === 0, `${tag}: no network requests leave the site`, offsite.join(', '));
+  check(problems.length === 0, `${tag}: no errors in the browser console`, problems.slice(0, 3).join(' | '));
+  await context.close();
+}
+
+// ---------------------------------------------------------------- scenario: grown-ups choose the math
+
+async function potionsSettings(browser, browserName, baseUrl) {
+  const tag = 'potions settings';
+  const { context, page, problems } = await openPage(browser, baseUrl, SIZES[0]);
+  const openParent = async () => {
+    await hold(page, browserName, '#btn-parent', 2300);
+    await page.waitForSelector('#screen-parent:not([hidden])', { timeout: 3000 });
+  };
+  const readPanel = () => page.evaluate(() => {
+    const pressed = (node) => node.getAttribute('aria-pressed') === 'true';
+    const toggles = [...document.querySelectorAll('#math-topics .toggle')];
+    return {
+      level: [...document.querySelectorAll('#math-level .seg-btn')].filter(pressed).map((node) => node.dataset.level).join(','),
+      all: toggles.map((node) => node.dataset.topic),
+      on: toggles.filter(pressed).map((node) => node.dataset.topic),
+      big: [...toggles, ...document.querySelectorAll('#math-level .seg-btn')].every((node) => {
+        const box = node.getBoundingClientRect();
+        return box.width >= 60 && box.height >= 60;
+      }),
+      message: document.querySelector('#math-message').textContent,
+    };
+  });
+  const showPanel = () => page.locator('#math-level').evaluate((node) => node.closest('.panel').scrollIntoView({ block: 'center' }));
+
+  // ---- defaults
+  await openParent();
+  let panel = await readPanel();
+  check(panel.level === 'hundred', `${tag}: the math level starts at "within 100"`, panel.level);
+  check(JSON.stringify(panel.all) === JSON.stringify(ALL_TOPICS) && panel.on.length === panel.all.length,
+    `${tag}: every topic has a toggle and starts switched on`, `${panel.on.join(',')} of ${panel.all.join(',')}`);
+  check(panel.big, `${tag}: level and topic buttons are big enough to tap`);
+
+  // ---- choose the easy level and only "taking away"
+  await tap(page, '#math-level [data-level="easy"]');
+  let saved = await readSaved(page);
+  check(saved.math.level === 'easy', `${tag}: the math level is saved in localStorage`, saved.math.level);
+  for (const topic of ALL_TOPICS.filter((id) => id !== 'sub')) await tap(page, `#math-topics [data-topic="${topic}"]`);
+  saved = await readSaved(page);
+  check(ALL_TOPICS.every((id) => saved.math.topics[id] === (id === 'sub')), `${tag}: topic toggles are saved in localStorage`, JSON.stringify(saved.math.topics));
+  await tap(page, '#math-topics [data-topic="sub"]');
+  panel = await readPanel();
+  saved = await readSaved(page);
+  check(panel.on.join(',') === 'sub' && saved.math.topics.sub === true, `${tag}: the last topic cannot be switched off`);
+  check(/at least one topic/i.test(panel.message), `${tag}: the grown-up is told to keep one topic on`, panel.message);
+  await showPanel();
+  await sleep(300);
+  await shot(page, '15-grownups-potions-portrait');
+  await tap(page, '#screen-parent .parent-buttons-end [data-go="home"]');
+  await page.waitForSelector('#screen-home:not([hidden])');
+
+  // ---- the settings survive a reload and show again in the grown-ups' corner
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForSelector('#screen-home:not([hidden])');
+  await openParent();
+  panel = await readPanel();
+  check(panel.level === 'easy' && panel.on.join(',') === 'sub', `${tag}: level and topics survive a reload`, `${panel.level} / ${panel.on.join(',')}`);
+  await tap(page, '#screen-parent .parent-buttons-end [data-go="home"]');
+
+  // ---- the next round follows them: only taking away, within 20
+  await tap(page, '#btn-potions');
+  await page.waitForSelector('#screen-brew:not([hidden])');
+  let turns = 0;
+  while (!(await isShowing(page, '#screen-done'))) {
+    turns += 1;
+    if (turns > 12) throw new Error('The easy round never finished');
+    const seen = await readBrew(page);
+    const want = solveBrew(seen);
+    check(seen.topic === 'sub' && seen.equation[1] === '−', `${tag}: easy round, turn ${turns} is taking away`, `${seen.topic} ${seen.equation.join(' ')}`);
+    check(want.numbers.every((n) => n >= 0 && n <= 20), `${tag}: easy round, turn ${turns} stays within 20`, want.numbers.join(','));
+    await tapDigits(page, want.digits);
+    const kind = await brewAndSeeResult(page);
+    check(kind === 'brewed', `${tag}: easy round, turn ${turns} brews`, kind);
+    await tapNext(page);
+  }
+  saved = await readSaved(page);
+  check(turns === 8 && saved.stars === 16 && saved.math.brewed === 8, `${tag}: a perfect round of 8 earns 16 stars`, `${turns} turns, ${saved.stars} stars`);
+
+  // ---- back to within 100 with two other topics
+  await tap(page, '#btn-done-home');
+  await openParent();
+  check((await page.locator('.parent-body').evaluate((node) => node.scrollTop)) === 0,
+    `${tag}: the grown-ups' corner opens at the top each time`);
+  await tap(page, '#math-level [data-level="hundred"]');
+  await tap(page, '#math-topics [data-topic="time"]');
+  await tap(page, '#math-topics [data-topic="coins"]');
+  await tap(page, '#math-topics [data-topic="sub"]');
+  saved = await readSaved(page);
+  check(saved.math.level === 'hundred' && ALL_TOPICS.filter((id) => saved.math.topics[id]).join(',') === 'time,coins',
+    `${tag}: topics can be switched back on`, JSON.stringify(saved.math));
+  check(/8 potions brewed/.test(await page.locator('#parent-progress').innerText()), `${tag}: the grown-up sees how many potions were brewed`);
+  await tap(page, '#screen-parent .parent-buttons-end [data-go="home"]');
+  await tap(page, '#btn-potions');
+  await page.waitForSelector('#screen-brew:not([hidden])');
+  let seen = await readBrew(page);
+  check(['time', 'coins'].includes(seen.topic), `${tag}: the new topics are used right away`, seen.topic);
+  await tap(page, '#btn-brew-quit');
+
+  // ---- resetting progress clears the potion count but keeps the math settings
+  await openParent();
+  await page.locator('#btn-reset').evaluate((node) => node.scrollIntoView({ block: 'center' }));
+  await tap(page, '#btn-reset');
+  await tap(page, '#btn-reset');
+  saved = await readSaved(page);
+  check(saved.stars === 0 && saved.math.brewed === 0 && saved.math.level === 'hundred' && saved.math.topics.time === true && saved.math.topics.add === false,
+    `${tag}: reset clears stars and potions but keeps the math settings`, JSON.stringify(saved.math));
+  check(problems.length === 0, `${tag}: no errors in the browser console`, problems.slice(0, 3).join(' | '));
+  await context.close();
+
+  // ---- a damaged or odd save never breaks the math settings
+  const odd = await openPage(browser, baseUrl, SIZES[1], {
+    saved: { math: { level: 'impossible', topics: { add: false, sub: false, place: false, skip: false, story: false, time: false, coins: false, extra: true }, brewed: -3 } },
+  });
+  await hold(odd.page, browserName, '#btn-parent', 2300);
+  await odd.page.waitForSelector('#screen-parent:not([hidden])', { timeout: 3000 });
+  const oddPanel = await odd.page.evaluate(() => ({
+    level: document.querySelector('#math-level .seg-btn[aria-pressed="true"]').dataset.level,
+    on: document.querySelectorAll('#math-topics .toggle[aria-pressed="true"]').length,
+  }));
+  check(oddPanel.level === 'hundred' && oddPanel.on === ALL_TOPICS.length, `${tag}: a damaged save falls back to the default math settings`, JSON.stringify(oddPanel));
+  await odd.page.locator('#math-level').evaluate((node) => node.closest('.panel').scrollIntoView({ block: 'center' }));
+  await sleep(300);
+  await shot(odd.page, '15-grownups-potions-landscape');
+  check(odd.problems.length === 0, `${tag}: a damaged save causes no console errors`, odd.problems.slice(0, 3).join(' | '));
+  await odd.context.close();
+}
+
+// ---------------------------------------------------------------- scenario: potions on tight screens
+
+// The hardest pictures to fit: the longest story, six coins, 99 in blocks,
+// a three-digit answer, 12:30 and the longest wordy sum. Runs with reduced
+// motion so it is quick; the layout is the same.
+async function potionsTight(browser, baseUrl) {
+  const answers = ['69', '76', '99', '99', '100', '70', '1230', '4'];
+  for (const size of [...SIZES, ...TIGHT_SIZES]) {
+    const tag = `potions ${size.name}`;
+    const tight = TIGHT_SIZES.includes(size);
+    const { context, page, problems } = await openPage(browser, baseUrl, size, { reducedMotion: 'reduce' });
+    await checkHome(page, tag);
+    if (tight) await shot(page, `09-tight-${size.name}-home`);
+    await page.evaluate(() => {
+      const P = window.SPELLCASTER_POTIONS;
+      const longest = P.stories.map((story, i) => [story.lines(99, 30).join(' ').length, i]).sort((a, b) => b[0] - a[0])[0][1];
+      const round = [
+        P.build.story(longest, 99, 30), P.build.coins([25, 25, 10, 10, 5, 1]), P.build.blocks(99), P.build.compose(99),
+        P.build.skip(60, 10, 4), P.build.sub(100, 30), P.build.time(12, 30), P.build.digit(47, 'tens'),
+      ];
+      P.makeRound = () => round;
+    });
+    await tap(page, '#btn-potions');
+    await page.waitForSelector('#screen-brew:not([hidden])');
+    for (let i = 0; i < answers.length; i++) {
+      const seen = await readBrew(page);
+      const want = solveBrew(seen);
+      check(want.digits === answers[i], `${tag}: the ${seen.show} problem reads as ${answers[i]}`, want.digits);
+      await tapDigits(page, want.digits);
+      await checkPlayLayout(page, `${tag} (${seen.show})`, '#screen-brew', BREW_ROWS);
+      await checkBrewPicture(page, `${tag} (${seen.show})`);
+      if (tight && ['story', 'coins', 'blocks', 'clock'].includes(seen.show)) await shot(page, `17-potions-tight-${size.name}-${seen.show}`);
+      const kind = await brewAndSeeResult(page);
+      check(kind === 'brewed', `${tag}: the ${seen.show} problem can be solved`, kind);
+      await sleep(250);
+      check(await resultCardFits(page), `${tag}: result card fits (${seen.show})`);
+      if (tight && seen.show === 'coins') await shot(page, `17-potions-tight-${size.name}-result`);
+      await tapNext(page);
+    }
+    await page.waitForSelector('#screen-done:not([hidden])');
+    await sleep(250);
+    check(await donePanelFits(page), `${tag}: the round-complete card fits, with Play again in reach`);
+    if (tight) await shot(page, `17-potions-tight-${size.name}-complete`);
+    await tap(page, '#btn-again');
+    await page.waitForSelector('#screen-brew:not([hidden])');
+    check(true, `${tag}: Play again starts another potion round`);
+    check(problems.length === 0, `${tag}: no console errors`, problems.slice(0, 2).join(' | '));
+    await context.close();
+  }
+}
+
+// ---------------------------------------------------------------- scenario: potions without speech or motion
+
+async function potionsQuiet(browser, baseUrl) {
+  // No speech at all: the recipe is on screen, so the round still works.
+  for (const size of [SIZES[0], TIGHT_SIZES[3]]) {
+    const tag = `potions without speech (${size.name})`;
+    const { context, page, problems } = await openPage(browser, baseUrl, size, { speech: 'none' });
+    await tap(page, '#btn-potions');
+    await page.waitForSelector('#screen-brew:not([hidden])');
+    check(await isShowing(page, '#screen-brew [data-speech-note]'), `${tag}: a friendly note is shown`);
+    check(!(await isShowing(page, '#btn-brew-hear')) && !(await isShowing(page, '#btn-brew-slow')), `${tag}: the Hear buttons are hidden`);
+    for (let i = 0; i < 3; i++) {
+      const seen = await readBrew(page);
+      const want = solveBrew(seen);
+      await tapDigits(page, want.digits);
+      await checkPlayLayout(page, `${tag} ${seen.show}`, '#screen-brew', BREW_ROWS);
+      await checkBrewPicture(page, `${tag} ${seen.show}`);
+      if (i === 0) {
+        await sleep(300);
+        await shot(page, `18-potions-no-speech-${size.name}`);
+      }
+      const kind = await brewAndSeeResult(page);
+      check(kind === 'brewed', `${tag}: potion ${i + 1} can be brewed`, kind);
+      await tapNext(page);
+    }
+    check(problems.length === 0, `${tag}: no console errors`, problems.slice(0, 3).join(' | '));
+    await context.close();
+  }
+
+  // The browser's own speech engine, untouched (headless browsers usually have no voices).
+  const real = await openPage(browser, baseUrl, SIZES[1], { speech: 'real' });
+  await tap(real.page, '#btn-potions');
+  await real.page.waitForSelector('#screen-brew:not([hidden])');
+  await sleep(1700);
+  const voices = await real.page.evaluate(() => ('speechSynthesis' in window && window.speechSynthesis ? window.speechSynthesis.getVoices().length : -1));
+  const hearShown = await isShowing(real.page, '#btn-brew-hear');
+  const noteShown = await isShowing(real.page, '#screen-brew [data-speech-note]');
+  check(voices > 0 ? hearShown && !noteShown : noteShown && !hearShown, 'potions with the real speech engine: Hear buttons or the note, never both',
+    `voices ${voices}, hear ${hearShown}, note ${noteShown}`);
+  await checkPlayLayout(real.page, 'potions with the real speech engine', '#screen-brew', BREW_ROWS);
+  await checkBrewPicture(real.page, 'potions with the real speech engine');
+  check(real.problems.length === 0, 'potions with the real speech engine: no console errors', real.problems.slice(0, 3).join(' | '));
+  await real.context.close();
+
+  // Reduced motion: the cauldron stops bubbling and nothing flies around.
+  const calm = await openPage(browser, baseUrl, SIZES[1], { reducedMotion: 'reduce' });
+  const running = () => calm.page.evaluate(() => document.getAnimations().filter((a) => a.playState === 'running').length);
+  await tap(calm.page, '#btn-potions');
+  await calm.page.waitForSelector('#screen-brew:not([hidden])');
+  await sleep(200);
+  check((await running()) === 0, 'potions with reduced motion: nothing animates on the brewing screen', String(await running()));
+  const seen = await readBrew(calm.page);
+  await tapDigits(calm.page, solveBrew(seen).digits);
+  const kind = await brewAndSeeResult(calm.page);
+  check(kind === 'brewed', 'potions with reduced motion: a potion still brews', kind);
+  await sleep(300);
+  check((await running()) === 0, 'potions with reduced motion: the result card is still', String(await running()));
+  check((await calm.page.locator('#fx .spark').count()) === 0, 'potions with reduced motion: no sparkle particles');
+  await shot(calm.page, '19-potions-reduced-motion-landscape');
+  await tapNext(calm.page);
+  check(calm.problems.length === 0, 'potions with reduced motion: no console errors', calm.problems.slice(0, 3).join(' | '));
+  await calm.context.close();
+
+  // A grown-up on a laptop can type the numbers; still no text field anywhere.
+  const keys = await openPage(browser, baseUrl, SIZES[1]);
+  await tap(keys.page, '#btn-potions');
+  await keys.page.waitForSelector('#screen-brew:not([hidden])');
+  const first = await readBrew(keys.page);
+  const want = solveBrew(first);
+  await keys.page.keyboard.press('9');
+  await keys.page.keyboard.press('Backspace');
+  for (const digit of want.digits) await keys.page.keyboard.press(digit);
+  check((await readBrew(keys.page)).slots.filter((ch) => ch).join('') === want.digits, 'potions with a keyboard: number keys and Backspace work');
+  await keys.page.keyboard.press('Enter');
+  await keys.page.waitForSelector('#result:not([hidden])');
+  check((await keys.page.getAttribute('#result', 'data-kind')) === 'brewed', 'potions with a keyboard: Enter brews the potion');
+  check(keys.problems.length === 0, 'potions with a keyboard: no console errors', keys.problems.slice(0, 3).join(' | '));
+  await keys.context.close();
+}
+
 // ---------------------------------------------------------------- run
 
 const scenarios = [
@@ -705,6 +1513,11 @@ const scenarios = [
   ['tight screens and tricky words', (b, name, url) => tightLayouts(b, url)],
   ['device without speech', (b, name, url) => withoutSpeech(b, url)],
   ['reduced motion', (b, name, url) => calmMode(b, url)],
+  ['potions recipes: thousands of generated problems', (b, name, url) => potionRecipes(b, url)],
+  ...SIZES.map((size) => [`potions whole round, ${size.name} ${size.width}x${size.height}`, (b, name, url) => potionsRound(b, url, size)]),
+  ['potions settings in the grown-ups corner', (b, name, url) => potionsSettings(b, name, url)],
+  ['potions on tight screens with the trickiest pictures', (b, name, url) => potionsTight(b, url)],
+  ['potions without speech, without motion, with a keyboard', (b, name, url) => potionsQuiet(b, url)],
 ];
 
 fs.mkdirSync(SHOTS, { recursive: true });
