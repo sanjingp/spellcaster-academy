@@ -222,24 +222,36 @@
   ];
 
   const speech = {
+    // Two things are kept apart, so that news about one cannot hide the other.
+    //
+    // Is there a voice to use?
     // 'ok'       an on-device voice is ready (or still loading, just after the page opens)
-    // 'failed'   there is a voice, but its last try to speak did not work
     // 'novoices' the browser can speak, but has no voice on this device
     // 'missing'  the browser cannot speak at all
-    status: 'speechSynthesis' in window && window.speechSynthesis &&
+    available: 'speechSynthesis' in window && window.speechSynthesis &&
       typeof window.SpeechSynthesisUtterance === 'function' ? 'ok' : 'missing',
+    // Did the last try to speak go wrong? Voices that come and go do not mend
+    // this: only a try that really speaks does (see `say`).
+    failed: false,
     voice: null,
     live: new Set(), // what is being said now; also keeps it alive (Safari drops it mid-word otherwise)
     checkTimer: 0,
 
+    // Both in one word, for the screens: 'missing', 'novoices', 'failed'
+    // (there is a voice, but its last try did not work) or 'ok'.
+    get status() {
+      if (this.available !== 'ok') return this.available;
+      return this.failed ? 'failed' : 'ok';
+    },
     get works() { return this.status === 'ok'; },
     // There is a voice worth another try, even if its last try failed.
-    get canTry() { return this.status === 'ok' || this.status === 'failed'; },
+    get canTry() { return this.available === 'ok'; },
 
-    setStatus(next) {
-      if (next === this.status) return;
-      this.status = next;
-      onSpeechChange();
+    // Changes `available` or `failed`, and tells the screens when that changes what they show.
+    set(changes) {
+      const before = this.status;
+      Object.assign(this, changes);
+      if (this.status !== before) onSpeechChange();
     },
 
     voices() {
@@ -264,7 +276,7 @@
     },
 
     pickVoice() {
-      if (this.status === 'missing') return null;
+      if (this.available === 'missing') return null;
       let best = null;
       let bestScore = 0;
       for (const voice of this.voices()) {
@@ -278,16 +290,15 @@
       return best;
     },
 
-    // Looks for an on-device voice again. Finding one does not mend a voice
-    // that failed: that takes a try that really speaks (see `say`).
+    // Looks for an on-device voice again. This only says whether there is one:
+    // a voice that failed stays failed, also when it leaves the list and comes back.
     checkVoices() {
-      if (this.status === 'missing') return;
-      if (!this.pickVoice()) this.setStatus('novoices');
-      else if (this.status === 'novoices') this.setStatus('ok');
+      if (this.available === 'missing') return;
+      this.set({ available: this.pickVoice() ? 'ok' : 'novoices' });
     },
 
     scheduleCheck() {
-      if (this.status === 'missing') return;
+      if (this.available === 'missing') return;
       clearTimeout(this.checkTimer);
       this.checkTimer = setTimeout(() => this.checkVoices(), 1200);
     },
@@ -299,14 +310,14 @@
     },
 
     say(text, { rate = WORD_RATE, pitch = 1.1, queue = false } = {}) {
-      if (this.status === 'missing') return false;
+      if (this.available === 'missing') return false;
       const voice = this.voice || this.pickVoice();
       if (!voice) {
         // Stay quiet rather than let the browser choose a voice that may be remote.
-        this.setStatus('novoices');
+        this.set({ available: 'novoices' });
         return false;
       }
-      if (this.status === 'novoices') this.setStatus('ok');
+      this.set({ available: 'ok' });
       try {
         const synth = window.speechSynthesis;
         if (!queue) this.cancel();
@@ -317,27 +328,27 @@
         utter.pitch = pitch;
         utter.volume = 1;
         utter.onstart = () => {
-          if (this.live.has(utter) && this.status === 'failed') this.setStatus('ok'); // it really spoke
+          if (this.live.has(utter)) this.set({ failed: false }); // it really spoke
         };
         utter.onend = () => this.live.delete(utter);
         utter.onerror = (event) => {
           if (!this.live.delete(utter)) return; // we stopped it ourselves
           const reason = event && event.error;
           if (reason === 'canceled' || reason === 'interrupted') return; // cut short, not broken
-          if (this.status === 'ok') this.setStatus('failed');
+          this.set({ failed: true });
         };
         this.live.add(utter);
         if (synth.paused) synth.resume();
         synth.speak(utter);
         return true;
       } catch (err) {
-        this.setStatus('missing');
+        this.set({ available: 'missing' });
         return false;
       }
     },
 
     hush() {
-      if (this.status === 'missing') return;
+      if (this.available === 'missing') return;
       try {
         this.cancel();
       } catch (err) { /* nothing to stop */ }

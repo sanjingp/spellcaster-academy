@@ -4,10 +4,39 @@ Last updated: 2026-10-11
 
 ## Status
 
-Both modes are built, and all 9 findings of the independent review (`REVIEW.md`) are fixed.
-`npm test` passes: **about 2,160 checks, 20 scenarios, about 10 minutes**
+Both modes are built, and all 9 findings of the independent review (`REVIEW.md`) are fixed,
+including the part of finding 2 that the second review (`REVIEW2.md`) sent back.
+`npm test` passes: **2,207 checks in the last full run, 21 scenarios, about 10.5 minutes** (625 s)
 (Chromium; WebKit is not installed on this machine, so the suite fell back as designed).
-The review fixes are in the working tree and **not committed yet**.
+The first round of review fixes is committed (a549eb2). The fix for the second review is in the
+working tree and **not committed yet** (`public/game.js`, `scripts/test.mjs`, this file).
+
+## Second review (REVIEW2.md) — remaining finding fixed
+
+The second review verified 8 of the 9 fixes and sent finding 2 back:
+
+- **P2 a failed voice was forgotten when the voice list was refreshed — fixed.** The game kept one
+  word for two things ("is there a voice?" and "did it last speak?"). So when the browser refreshed
+  its voice list — empty first, then the same on-device voice again — "failed" was overwritten by
+  "no voices" and then by "ok", and Peek and the note went away though nothing had been heard.
+  Now `speech` keeps them apart: `available` (`ok` / `novoices` / `missing`) is all a voice-list
+  change or the delayed voice check can touch, and `failed` is set by a speech error and cleared
+  only when a try really starts speaking. What the screens show (`speech.status`) is worked out
+  from the two. A try that fails while no voice is listed is remembered too.
+  *Test `review 2 again`* (`npm test -- "review 2 again"`, about 20 seconds, 45 checks):
+  - the reviewer's exact steps — step 4, `not-allowed`, Peek runs out, `voiceschanged` with an empty
+    list, then with the on-device voice: Peek and the note stay, no new utterance, a retry that
+    fails keeps them, a retry that plays brings Hear and Slowly back;
+  - the same with a list that holds only online voices;
+  - the refresh arriving while the word is still flashing, then in Potions, on the home screen and
+    in the grown-ups' corner (the voice line keeps saying the voice did not work until "Test the
+    voice" really plays);
+  - a voice that never failed is trusted again as soon as it is back (no sticky fallback);
+  - a voice lost in the middle of a word stays "failed" when it is listed again.
+  Run against the code from before the fix, the scenario fails in every one of these blocks except
+  the "never failed" one (which is there to catch over-correcting).
+  The test stand-in for `speechSynthesis` now keeps `voiceschanged` listeners;
+  `window.__setVoices(list)` swaps the voices and fires the event.
 
 ## Review findings (REVIEW.md) — all fixed
 
@@ -22,8 +51,10 @@ one). Every scenario was also run against the code from before the fix, where it
 2. **P2 speech failures — fixed.** Any speech error other than `canceled`/`interrupted` (and other
    than a word the game stopped itself) puts the voice in a "failed" state: the word flashes, Peek
    and the note stay, and Hear stays for another try. Only a try that really starts speaking
-   clears it; the 1.2-second voice check no longer does.
+   clears it; the 1.2-second voice check no longer does, and neither does a refreshed voice list
+   (second review, see above).
    *Test `review 2`:* seven error kinds, before and after the voice check, a failed retry, a working retry.
+   *Test `review 2 again`:* the voice list going away and coming back while the voice is failed.
 3. **P2 retry gap — fixed.** A missed word keeps its place in line: nothing is put in front of it,
    so it is back after exactly three other turns (fewer only when fewer words are left).
    *Test `review 3`:* the reviewer's five-word case (was 12 turns, now 3), plus a second miss.
@@ -108,7 +139,12 @@ one). Every scenario was also run against the code from before the fix, where it
 - Speech uses on-device voices only. A device that offers only online voices plays silently, with
   the word flashed instead; that is on purpose (nothing leaves the iPad).
 - The review fixes were checked with stand-ins for `speechSynthesis` and `localStorage`. Whether
-  Safari reports `localService` and speech errors the same way still needs a look on the iPad.
+  Safari reports `localService`, speech errors and `voiceschanged` the same way still needs a look
+  on the iPad.
+- While the voice counts as failed, each new word at steps 2 to 4 is flashed once at the start of
+  its turn, also on the turn where the voice starts working again (the flash is not cut short).
+- `screenshots/` still holds a few `FAILED-*.png` files from older runs made on purpose against
+  unfixed code; the folder is not in git and a passing run does not clear them.
 - On the easy level counting by 10s has a single row (`0, 10, ?`), so it comes up less often.
 - The clock answer shows one box per digit, so it gives away whether the hour has one or two digits.
 - Coins are drawn as labelled circles (1¢, 5¢, 10¢, 25¢), not as real coin faces.
@@ -125,3 +161,6 @@ one). Every scenario was also run against the code from before the fix, where it
 - 2026-10-11: Claude fixed all 9 findings and added a test scenario for each; `npm test` passes.
   Not committed (as asked). Next: commit, push.
 - Codex re-review (REVIEW2.md): 8/9 verified; finding 2 voiceschanged transition remains. Claude fixing next.
+- 2026-10-11: Claude fixed the remaining finding 2 (playback failure kept apart from voice
+  availability) and added the `review 2 again` scenario; `npm test` passes, 2,207 checks.
+  Not committed (as asked). Next: commit, push, third look by the reviewer if wanted.

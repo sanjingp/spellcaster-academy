@@ -54,17 +54,24 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 //   setup.voices – [name, lang, localService] for each voice the device offers
 //   setup.error  – every utterance fails with this error code instead of speaking
 //                  (a test can change it later through window.__speechError)
+// window.__setVoices(list) swaps the voices mid-visit and fires `voiceschanged`, as the browser does.
 function speechStub(setup) {
   const spoken = [];
+  const toVoice = ([name, lang, localService]) => ({ name, lang, voiceURI: name, localService, default: false });
   const voices = (setup.voices || [
     ['Albert', 'en-US', true],
     ['Daniel', 'en-GB', true],
     ['Thomas', 'fr-FR', true],
     ['Samantha', 'en-US', true],
     ['Fred', 'en-US', true],
-  ]).map(([name, lang, localService]) => ({ name, lang, voiceURI: name, localService, default: false }));
+  ]).map(toVoice);
+  const voiceListeners = [];
   window.__spoken = spoken;
   window.__speechError = setup.error || null;
+  window.__setVoices = (list) => {
+    voices.splice(0, voices.length, ...list.map(toVoice)); // new voice objects each time, like a real refresh
+    for (const listener of voiceListeners) listener(new Event('voiceschanged'));
+  };
   window.SpeechSynthesisUtterance = class {
     constructor(text) {
       this.text = text;
@@ -101,7 +108,9 @@ function speechStub(setup) {
     cancel() {},
     pause() {},
     resume() {},
-    addEventListener() {},
+    addEventListener(type, listener) {
+      if (type === 'voiceschanged') voiceListeners.push(listener);
+    },
     removeEventListener() {},
   };
   Object.defineProperty(window, 'speechSynthesis', { configurable: true, get: () => synth });
@@ -1801,6 +1810,156 @@ async function speechFailures(browser, baseUrl) {
   await context.close();
 }
 
+// ---------------------------------------------------------------- second review (REVIEW2.md): a failed voice and a refreshed voice list
+
+const VOICE_ON_DEVICE = [['Samantha', 'en-US', true]];
+
+// The second reviewer's case: the voice fails, then the browser refreshes its
+// voice list — empty first, then the same on-device voice again. A voice that
+// is merely listed again has still not been heard, so Peek and the note have
+// to stay until a try really speaks.
+async function voiceListRefresh(browser, browserName, baseUrl) {
+  const setVoices = (page, list) => page.evaluate((voices) => window.__setVoices(voices), list);
+  const spokenCount = async (page) => (await spokenList(page)).length;
+  // What the play screen offers right now, e.g. "btn-hear btn-peek + note".
+  const offered = async (page) => `${await listenButtons(page)}${await isShowing(page, '#screen-play [data-speech-note]') ? ' + note' : ''}`;
+
+  // ---- the reviewer's steps, and the same with a list that only has online voices in it
+  await Promise.all([['an empty voice list', []], ['only online voices', VOICES_REMOTE]].map(async ([name, gone]) => {
+    const tag = `failed voice, then ${name}, then the voice again`;
+    const { context, page, problems } = await openPage(browser, baseUrl, SIZES[0], {
+      speech: { voices: VOICE_ON_DEVICE, error: 'not-allowed' }, saved: WORD_AT_STEP_4, reducedMotion: 'reduce',
+    });
+    await tap(page, '#btn-spells');
+    await page.waitForSelector('#screen-play:not([hidden])');
+    await page.waitForSelector('#model.is-peek', { state: 'visible', timeout: 3000 }).catch(() => {});
+    await page.waitForSelector('#model', { state: 'hidden', timeout: 5000 }); // Peek has run out
+    check(await offered(page) === 'btn-hear btn-peek + note', `${tag}: the failed voice leaves Hear, Peek and the note`, await offered(page));
+    const triedBefore = await spokenCount(page);
+
+    await setVoices(page, gone);
+    check(await offered(page) === 'btn-peek + note', `${tag}: while no voice is listed, Peek and the note stay and Hear goes`, await offered(page));
+
+    await setVoices(page, VOICE_ON_DEVICE);
+    check(await offered(page) === 'btn-hear btn-peek + note', `${tag}: Peek and the note are still there once the voice is listed again`, await offered(page));
+    check(await spokenCount(page) === triedBefore, `${tag}: nothing was spoken in between, so nothing has been heard yet`,
+      `${await spokenCount(page) - triedBefore} new utterance(s)`);
+    if (!gone.length) await shot(page, '23-voice-list-refresh-peek-kept-portrait');
+    await tap(page, '#btn-peek');
+    check((await readTurn(page, ['magic'])).model === 'magic', `${tag}: Peek still shows the word`);
+    await page.waitForSelector('#model', { state: 'hidden', timeout: 5000 });
+
+    // A retry that fails again changes nothing.
+    await tap(page, '#btn-hear');
+    await sleep(200);
+    check(await spokenCount(page) === triedBefore + 1, `${tag}: Hear really tries the voice again`, `${await spokenCount(page) - triedBefore} new utterance(s)`);
+    check(await offered(page) === 'btn-hear btn-peek + note', `${tag}: a retry that fails keeps Peek and the note`, await offered(page));
+
+    // Only a retry that really plays brings the normal buttons back.
+    await page.evaluate(() => { window.__speechError = null; });
+    await tap(page, '#btn-hear');
+    await page.waitForSelector('#btn-peek', { state: 'hidden', timeout: 3000 }).catch(() => {});
+    check(await offered(page) === 'btn-hear btn-slow', `${tag}: a retry that plays brings Hear and Slowly back and clears the note`, await offered(page));
+    const last = (await spokenList(page)).pop();
+    check(last.text === 'magic' && last.voice === 'Samantha' && last.local === true, `${tag}: that retry spoke the word with the on-device voice`, `"${last.text}" by ${last.voice}`);
+    const result = await playTurn(page, ['magic']);
+    check(result.kind === 'mastered', `${tag}: the word can be mastered`, result.kind);
+    check(problems.length === 0, `${tag}: no console errors`, problems.slice(0, 3).join(' | '));
+    await context.close();
+  }));
+
+  // ---- the list is refreshed while the word is still flashing; then Potions, home and the grown-ups' corner
+  let tag = 'voice list refreshed during the flash';
+  const flash = await openPage(browser, baseUrl, SIZES[1], {
+    speech: { voices: VOICE_ON_DEVICE, error: 'synthesis-failed' }, saved: WORD_AT_STEP_4, reducedMotion: 'reduce',
+  });
+  let page = flash.page;
+  await tap(page, '#btn-spells');
+  await page.waitForSelector('#screen-play:not([hidden])');
+  await page.waitForSelector('#model.is-peek', { state: 'visible', timeout: 3000 }).catch(() => {});
+  await setVoices(page, []);
+  await setVoices(page, VOICE_ON_DEVICE);
+  check((await readTurn(page, ['magic'])).model === 'magic', `${tag}: the word keeps flashing`);
+  check(await isShowing(page, '#screen-play [data-speech-note]'), `${tag}: the note stays during the flash`);
+  await page.waitForSelector('#model', { state: 'hidden', timeout: 5000 });
+  check(await offered(page) === 'btn-hear btn-peek + note', `${tag}: Hear, Peek and the note are there after the flash`, await offered(page));
+  await tap(page, '#btn-quit');
+  await page.waitForSelector('#screen-home:not([hidden])');
+  check(await isShowing(page, '#screen-home [data-speech-note]'), `${tag}: the home screen still says there is no voice right now`);
+
+  tag = 'voice list refreshed in Potions';
+  await tap(page, '#btn-potions'); // tries the voice (it fails again) and starts the delayed voice check
+  await page.waitForSelector('#screen-brew:not([hidden])');
+  const brewOffers = async () => `hear ${await isShowing(page, '#btn-brew-hear')}, note ${await isShowing(page, '#screen-brew [data-speech-note]')}`;
+  check(await brewOffers() === 'hear true, note false', `${tag}: a failed voice keeps the Hear buttons, the recipe is on screen anyway`, await brewOffers());
+  await setVoices(page, []);
+  check(await brewOffers() === 'hear false, note true', `${tag}: with no voice listed the note takes the place of the Hear buttons`, await brewOffers());
+  await setVoices(page, VOICE_ON_DEVICE);
+  check(await brewOffers() === 'hear true, note false', `${tag}: the Hear buttons are back with the voice, for another try`, await brewOffers());
+  await sleep(1400); // past the delayed voice check
+  await tap(page, '#btn-brew-quit');
+  await page.waitForSelector('#screen-home:not([hidden])');
+  check(await isShowing(page, '#screen-home [data-speech-note]'), `${tag}: the home screen still says there is no voice right now`);
+
+  tag = 'voice list refreshed, grown-ups corner';
+  const voiceLine = () => page.locator('#voice-status').innerText();
+  await hold(page, browserName, '#btn-parent', 2300);
+  await page.waitForSelector('#screen-parent:not([hidden])', { timeout: 3000 });
+  await page.locator('#btn-test-voice').evaluate((node) => node.scrollIntoView({ block: 'center' }));
+  check(/did not work/.test(await voiceLine()), `${tag}: the grown-up is told the voice did not work`, await voiceLine());
+  await setVoices(page, []);
+  check(/never used/.test(await voiceLine()), `${tag}: with no voice listed, the grown-up is told there is none`, await voiceLine());
+  await setVoices(page, VOICE_ON_DEVICE);
+  check(/did not work/.test(await voiceLine()), `${tag}: with the voice listed again, it still says the voice did not work`, await voiceLine());
+  await shot(page, '23-voice-list-refresh-grownups-landscape');
+  await tap(page, '#btn-test-voice'); // fails again, and starts the delayed voice check
+  await sleep(1500);
+  check(/did not work/.test(await voiceLine()), `${tag}: a voice test that fails leaves it that way, also after the voice check`, await voiceLine());
+  await page.evaluate(() => { window.__speechError = null; });
+  await tap(page, '#btn-test-voice');
+  await page.waitForFunction(() => /Samantha/.test(document.querySelector('#voice-status').textContent), null, { timeout: 3000 }).catch(() => {});
+  check(/Samantha/.test(await voiceLine()) && /on this device/.test(await voiceLine()), `${tag}: a voice test that plays names the voice again`, await voiceLine());
+  await tap(page, '#screen-parent .parent-buttons-end [data-go="home"]');
+  await page.waitForSelector('#screen-home:not([hidden])');
+  check(!(await isShowing(page, '#screen-home [data-speech-note]')), `${tag}: the home screen's note is gone once the voice has played`);
+  check(flash.problems.length === 0, `${tag}: no console errors`, flash.problems.slice(0, 3).join(' | '));
+  await flash.context.close();
+
+  // ---- a voice that never failed is not held back by a refresh; one that fails while it is unlisted is
+  tag = 'healthy voice, refreshed list';
+  const healthy = await openPage(browser, baseUrl, SIZES[0], { speech: { voices: VOICE_ON_DEVICE }, saved: WORD_AT_STEP_4, reducedMotion: 'reduce' });
+  page = healthy.page;
+  await tap(page, '#btn-spells');
+  await page.waitForSelector('#screen-play:not([hidden])');
+  await sleep(1400); // past the delayed voice check
+  check(await offered(page) === 'btn-hear btn-slow', `${tag}: a working voice offers Hear and Slowly`, await offered(page));
+  await setVoices(page, []);
+  check((await readTurn(page, ['magic'])).model === 'magic' && await isShowing(page, '#screen-play [data-speech-note]'),
+    `${tag}: when the voice goes away the word is flashed, with the note`);
+  await page.waitForSelector('#model', { state: 'hidden', timeout: 5000 });
+  check(await offered(page) === 'btn-peek + note', `${tag}: only Peek is offered while there is no voice`, await offered(page));
+  await setVoices(page, VOICE_ON_DEVICE);
+  check(await offered(page) === 'btn-hear btn-slow', `${tag}: a voice that never failed is trusted again as soon as it is back`, await offered(page));
+
+  tag = 'voice lost in the middle of a word';
+  // One step, so the list is already empty when the error for this try comes in.
+  await page.evaluate(() => {
+    window.__speechError = 'voice-unavailable';
+    document.querySelector('#btn-hear').click();
+    window.__setVoices([]);
+  });
+  await sleep(200);
+  check(await offered(page) === 'btn-peek + note', `${tag}: only Peek is offered while there is no voice`, await offered(page));
+  await setVoices(page, VOICE_ON_DEVICE);
+  check(await offered(page) === 'btn-hear btn-peek + note', `${tag}: the try that failed is remembered when the voice is listed again`, await offered(page));
+  await page.evaluate(() => { window.__speechError = null; });
+  await tap(page, '#btn-hear');
+  await page.waitForSelector('#btn-peek', { state: 'hidden', timeout: 3000 }).catch(() => {});
+  check(await offered(page) === 'btn-hear btn-slow', `${tag}: a retry that plays brings Hear and Slowly back and clears the note`, await offered(page));
+  check(healthy.problems.length === 0, `${tag}: no console errors`, healthy.problems.slice(0, 3).join(' | '));
+  await healthy.context.close();
+}
+
 // ---------------------------------------------------------------- review fix 3: a missed word comes back soon
 
 // The reviewer's case: five words, the first one missed, everything after it
@@ -2336,6 +2495,8 @@ const scenarios = [
   ['review 7: a save that fails is not called saved', (b, name, url) => failedSave(b, name, url)],
   ['review 8: long words stay inside their card', (b, name, url) => longWords(b, url)],
   ['review 9: a keyboard cannot enter answers', (b, name, url) => keyboardCannotAnswer(b, url)],
+  // The one finding the second review (REVIEW2.md) sent back.
+  ['review 2 again: a failed voice stays failed when the voice list is refreshed', (b, name, url) => voiceListRefresh(b, name, url)],
 ];
 
 fs.mkdirSync(SHOTS, { recursive: true });
