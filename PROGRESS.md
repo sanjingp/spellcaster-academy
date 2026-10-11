@@ -75,3 +75,6 @@ Potions mode is in the working tree and **not committed yet**.
 - The home screen's single Start button became the two mode buttons (`#btn-spells`, `#btn-potions`).
 - The grown-ups' corner now always opens scrolled to the top.
 - The round-complete card is wider in landscape so "Play again" is always in reach.
+
+## Orchestration log
+- Codex review done (REVIEW.md, commit e1aad7a). Next: Claude fixes all 9 findings, npm test, commit, push.
