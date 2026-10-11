@@ -124,3 +124,4 @@ one). Every scenario was also run against the code from before the fix, where it
 - Codex review done (REVIEW.md, commit e1aad7a).
 - 2026-10-11: Claude fixed all 9 findings and added a test scenario for each; `npm test` passes.
   Not committed (as asked). Next: commit, push.
+- Codex re-review (REVIEW2.md): 8/9 verified; finding 2 voiceschanged transition remains. Claude fixing next.
