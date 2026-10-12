@@ -2531,7 +2531,7 @@ async function keyboardCannotAnswer(browser, baseUrl) {
 
 const DAY = 24 * 60 * 60 * 1000;
 const DRILLS = ['make10', 'doubles'];
-const MAIN_SAVE_KEYS = ['words', 'custom', 'roundSize', 'progress', 'math', 'stars', 'robe', 'familiar', 'chimes'];
+const MAIN_SAVE_KEYS = ['words', 'custom', 'week', 'weekOnly', 'roundSize', 'progress', 'math', 'stars', 'robe', 'familiar', 'chimes'];
 
 // One saved fact for a seeded fact memory. `due` says whether its wait is over.
 function savedFact(box, { due = false, miss = false, pace = 'quick', times = [3000], seen = 3, right = 3 } = {}) {
@@ -3716,7 +3716,7 @@ async function oldSaveSurvives(browser, browserName, baseUrl) {
   await tap(page, '#btn-reset-facts');
   await tap(page, '#btn-reset-facts');
   let now = await readSaved(page);
-  check(JSON.stringify(Object.keys(now)) === JSON.stringify(Object.keys(old)) && JSON.stringify(Object.keys(now.math)) === JSON.stringify(Object.keys(old.math)),
+  check(JSON.stringify(Object.keys(now).filter((k) => k !== 'week' && k !== 'weekOnly')) === JSON.stringify(Object.keys(old)) && JSON.stringify(Object.keys(now.math)) === JSON.stringify(Object.keys(old.math)),
     `${tag}: the save has the same fields as before, in the same order`, Object.keys(now).join());
   check(JSON.stringify(now.words) === JSON.stringify(old.words) && now.custom === true && now.roundSize === 3, `${tag}: the word list is untouched`, JSON.stringify(now.words));
   check(JSON.stringify(now.progress.because) === JSON.stringify(old.progress.because) && now.progress.friend.step === 3 && now.progress.friend.mastered === 0,

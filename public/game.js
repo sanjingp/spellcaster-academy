@@ -113,6 +113,8 @@
     return {
       words: DATA.starterWords.slice(),
       custom: false,
+      week: [],         // this week's words (a subset of words)
+      weekOnly: false,  // practise only this week's words
       roundSize: 5, // 0 means "all words"
       progress: Object.create(null), // word -> { step, mastered, best, last }; no prototype, so any word is a safe key
       math: freshMath(),
@@ -152,6 +154,11 @@
           state.words = words;
           state.custom = !!saved.custom;
         }
+        if (Array.isArray(saved.week)) {
+          const inList = new Set(state.words);
+          state.week = sanitizeWords(saved.week.join(' ')).words.filter((w) => inList.has(w));
+        }
+        state.weekOnly = !!saved.weekOnly && state.week.length > 0;
         if ([0, 3, 5, 8].includes(saved.roundSize)) state.roundSize = saved.roundSize;
         if (Number.isFinite(saved.stars) && saved.stars >= 0) state.stars = Math.floor(saved.stars);
         if (saved.progress && typeof saved.progress === 'object') {
@@ -651,18 +658,25 @@
   // ------------------------------------------------------------------
   // Home
   // ------------------------------------------------------------------
+  // The words practised right now: this week's only, when a grown-up asked for that.
+  function practiceWords() {
+    return state.weekOnly && state.week.length ? state.week : state.words;
+  }
+
   function roundWords() {
-    const size = state.roundSize === 0 ? state.words.length : Math.min(state.roundSize, state.words.length);
-    const fresh = state.words.filter((w) => !progressFor(w).mastered);
-    const known = state.words
+    const pool = practiceWords();
+    const size = state.roundSize === 0 ? pool.length : Math.min(state.roundSize, pool.length);
+    const fresh = pool.filter((w) => !progressFor(w).mastered);
+    const known = pool
       .filter((w) => progressFor(w).mastered)
       .sort((a, b) => progressFor(a).mastered - progressFor(b).mastered || progressFor(a).last - progressFor(b).last);
     return fresh.concat(known).slice(0, size);
   }
 
   function renderHome() {
-    const total = state.words.length;
-    const mastered = state.words.filter((w) => progressFor(w).mastered).length;
+    const pool = practiceWords();
+    const total = pool.length;
+    const mastered = pool.filter((w) => progressFor(w).mastered).length;
     const brewed = state.math.brewed;
     $('#spells-status').textContent = `${mastered} of ${plural(total, 'word')} mastered`;
     $('#potions-status').textContent = brewed ? `${plural(brewed, 'potion')} brewed` : 'Number magic';
@@ -2119,6 +2133,7 @@
   function renderParent() {
     wordInput.value = state.words.join('\n');
     renderParentWords();
+    renderParentWeek();
     renderParentMath();
     renderParentFacts();
     for (const btn of $$('#round-size .seg-btn')) {
@@ -2145,7 +2160,10 @@
     }
     state.words = words;
     state.custom = true;
+    state.week = state.week.filter((w) => words.includes(w));
+    if (!state.week.length) state.weekOnly = false;
     const kept = saveState();
+    renderParentWeek();
     wordInput.value = words.join('\n');
     wordInput.blur();
     const note = skipped.length ? ` Skipped: ${skipped.slice(0, 8).join(', ')}.` : '';
@@ -2157,10 +2175,62 @@
   function useStarter() {
     state.words = DATA.starterWords.slice();
     state.custom = false;
+    state.week = [];
+    state.weekOnly = false;
     const kept = saveState();
+    renderParentWeek();
     wordInput.value = state.words.join('\n');
     wordInput.blur();
     renderParentWords(`Starter list is ready (${plural(state.words.length, 'word')})${kept ? '' : ', for this visit only'}.`);
+  }
+
+  // This week's words: a short list inside the saved words. Adding one that is not saved yet
+  // adds it to the saved words too, so nothing old is ever removed.
+  const weekInput = $('#week-input');
+
+  function renderParentWeek(message) {
+    if (!weekInput) return;
+    weekInput.value = state.week.join('\n');
+    const btn = $('#btn-week-only');
+    btn.textContent = `Practice this week only: ${state.weekOnly ? 'ON' : 'off'}`;
+    btn.setAttribute('aria-pressed', String(state.weekOnly));
+    btn.classList.toggle('is-chosen', state.weekOnly);
+    $('#week-message').textContent = message || (state.week.length
+      ? `This week: ${plural(state.week.length, 'word')}. ${state.weekOnly ? 'Rounds use only these.' : 'Rounds use all saved words.'}`
+      : 'No words for this week yet.');
+  }
+
+  function saveWeek() {
+    const { words, skipped } = sanitizeWords(weekInput.value);
+    const added = [];
+    for (const w of words) {
+      if (!state.words.includes(w)) {
+        if (state.words.length >= MAX_WORDS) continue;
+        state.words.push(w);
+        added.push(w);
+      }
+    }
+    if (added.length && !state.custom) state.custom = true;
+    state.week = words.filter((w) => state.words.includes(w));
+    if (state.week.length) state.weekOnly = true; else state.weekOnly = false;
+    const kept = saveState();
+    weekInput.blur();
+    renderParentWords();
+    wordInput.value = state.words.join('\n');
+    const note = skipped.length ? ` Skipped: ${skipped.slice(0, 8).join(', ')}.` : '';
+    renderParentWeek(state.week.length
+      ? `Saved ${plural(state.week.length, 'word')} for this week${kept ? '' : ' (this visit only)'}. Practice this week only is ON.${note}`
+      : `This week's list is empty, so rounds use all saved words.${note}`);
+  }
+
+  function toggleWeekOnly() {
+    if (!state.weekOnly && !state.week.length) {
+      renderParentWeek('Type this week’s words above and tap “Save this week” first.');
+      return;
+    }
+    state.weekOnly = !state.weekOnly;
+    saveState();
+    renderParentWeek();
   }
 
   function resetProgress() {
@@ -2294,6 +2364,8 @@
 
   holdToOpen($('#btn-parent'), 2000, () => show('parent'));
   $('#btn-save-words').addEventListener('click', saveWords);
+  $('#btn-save-week').addEventListener('click', saveWeek);
+  $('#btn-week-only').addEventListener('click', toggleWeekOnly);
   $('#btn-starter').addEventListener('click', useStarter);
   $('#btn-reset').addEventListener('click', resetProgress);
   $('#btn-reset-facts').addEventListener('click', resetFacts);

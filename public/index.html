@@ -341,6 +341,21 @@
         </div>
 
         <div class="panel">
+          <h3 class="pick-title">This week’s words</h3>
+          <label class="parent-label" for="week-input">
+            Paste just this week’s words. Older words stay saved for later.
+          </label>
+          <textarea id="week-input" class="word-input" rows="5" autocomplete="off" autocapitalize="off"
+            autocorrect="off" spellcheck="false" inputmode="text" enterkeyhint="enter"
+            placeholder="smiling&#10;racing&#10;were"></textarea>
+          <div class="parent-buttons">
+            <button id="btn-save-week" class="btn btn-start btn-medium" type="button">Save this week</button>
+            <button id="btn-week-only" class="btn btn-soft" type="button" aria-pressed="false">Practice this week only: off</button>
+          </div>
+          <p id="week-message" class="parent-message" role="status" aria-live="polite"></p>
+        </div>
+
+        <div class="panel">
           <h3 class="pick-title">Spells per round</h3>
           <div id="round-size" class="seg" role="group" aria-label="Spells per round">
             <button class="seg-btn" type="button" data-size="3">3</button>
