@@ -5,6 +5,8 @@
 //
 //   npm test              everything
 //   npm test -- potions   only the scenarios with "potions" in their name
+//   npm test -- math      only the math fluency scenarios (ten-frames, hints, drills, speedy brews, slow facts)
+//   npm test -- "math fix"  only the scenarios for the findings of the math review (mathup/REVIEW-MATH.md)
 //
 // Uses WebKit when its browser is installed, otherwise Chromium.
 import fs from 'node:fs';
@@ -16,6 +18,7 @@ import { startServer } from './serve.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SHOTS = path.join(ROOT, 'screenshots');
 const STORE_KEY = 'spellcaster-academy-v1';
+const FACTS_KEY = 'spellcaster-academy-facts-v1'; // fact memory: its own key, next to the save above
 const MIN_TAP = 60;
 
 const SIZES = [
@@ -54,9 +57,15 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 //   setup.voices – [name, lang, localService] for each voice the device offers
 //   setup.error  – every utterance fails with this error code instead of speaking
 //                  (a test can change it later through window.__speechError)
+//   setup.lasts  – every utterance takes this many ms, one after the other like a real
+//                  voice, and cancel() cuts them off. Without it each is over in a moment.
+//                  (window.__speechLasts changes it later; 'forever': the end is never reported)
 // window.__setVoices(list) swaps the voices mid-visit and fires `voiceschanged`, as the browser does.
+// window.__talking says whether a voice that takes its time still has something to say.
 function speechStub(setup) {
   const spoken = [];
+  const waiting = []; // utterances that take their time, in the order they are spoken
+  let ending = 0;
   const toVoice = ([name, lang, localService]) => ({ name, lang, voiceURI: name, localService, default: false });
   const voices = (setup.voices || [
     ['Albert', 'en-US', true],
@@ -68,6 +77,19 @@ function speechStub(setup) {
   const voiceListeners = [];
   window.__spoken = spoken;
   window.__speechError = setup.error || null;
+  window.__speechLasts = setup.lasts || 0;
+  Object.defineProperty(window, '__talking', { configurable: true, get: () => waiting.length > 0 });
+  const speakNext = () => {
+    const utterance = waiting[0];
+    if (!utterance) return;
+    if (utterance.onstart) utterance.onstart({});
+    if (window.__speechLasts === 'forever') return;
+    ending = setTimeout(() => {
+      waiting.shift();
+      if (utterance.onend) utterance.onend({});
+      speakNext();
+    }, window.__speechLasts);
+  };
   window.__setVoices = (list) => {
     voices.splice(0, voices.length, ...list.map(toVoice)); // new voice objects each time, like a real refresh
     for (const listener of voiceListeners) listener(new Event('voiceschanged'));
@@ -96,6 +118,11 @@ function speechStub(setup) {
         local: utterance.voice ? utterance.voice.localService : null,
       });
       const error = window.__speechError;
+      if (!error && window.__speechLasts) {
+        waiting.push(utterance);
+        setTimeout(() => { if (waiting[0] === utterance) speakNext(); }, 10);
+        return;
+      }
       setTimeout(() => {
         if (error) {
           if (utterance.onerror) utterance.onerror({ error: error === 'no-code' ? undefined : error });
@@ -105,7 +132,10 @@ function speechStub(setup) {
         setTimeout(() => utterance.onend && utterance.onend({}), 20);
       }, 10);
     },
-    cancel() {},
+    cancel() {
+      clearTimeout(ending);
+      waiting.length = 0;
+    },
     pause() {},
     resume() {},
     addEventListener(type, listener) {
@@ -125,14 +155,27 @@ function removeSpeech() {
 }
 
 // Every localStorage write fails, the way a full disk or private browsing does.
-// A test can let writes through again with window.__storageFull = false.
-function fullStorage() {
+// A test can let writes through again with window.__storageFull = false, or have
+// only one key refused with window.__storageFull = 'that key' (the save that
+// grew too big for what is left, while the smaller one still fits).
+function fullStorage(full = true) {
   const write = Storage.prototype.setItem;
-  window.__storageFull = true;
+  window.__storageFull = full;
   Storage.prototype.setItem = function setItem(...args) {
-    if (window.__storageFull) throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+    if (window.__storageFull === true || window.__storageFull === args[0]) {
+      throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+    }
     return write.apply(this, args);
   };
+}
+
+// Lets a test make time pass for the game without waiting: window.__wait(ms)
+// moves the stopwatch the game times answers with.
+function movableClock() {
+  const real = performance.now.bind(performance);
+  let skipped = 0;
+  performance.now = () => real() + skipped;
+  window.__wait = (ms) => { skipped += ms; };
 }
 
 // The browser refuses to hand over localStorage at all.
@@ -157,8 +200,14 @@ async function launchBrowser() {
 
 // speech:  'stub' (five on-device voices), { voices, error } for a stub set up another way,
 //          'none' (no speech API) or 'real' (the browser's own engine, untouched)
-// storage: 'full' or 'blocked' to make saving fail
-async function openPage(browser, baseUrl, size, { speech = 'stub', saved = null, reducedMotion = 'no-preference', storage = null } = {}) {
+// storage: 'full' or 'blocked' to make saving fail; 'picky' saves everything until the
+//          test sets window.__storageFull (see fullStorage)
+// saved, savedFacts: what is already in localStorage (the game save, the fact memory);
+//          a string is stored as it is, to try a damaged save
+// clock:   true to let the test move the game's stopwatch (see movableClock)
+async function openPage(browser, baseUrl, size, {
+  speech = 'stub', saved = null, savedFacts = null, reducedMotion = 'no-preference', storage = null, clock = false,
+} = {}) {
   const context = await browser.newContext({
     viewport: { width: size.width, height: size.height },
     deviceScaleFactor: 1,
@@ -168,12 +217,15 @@ async function openPage(browser, baseUrl, size, { speech = 'stub', saved = null,
   if (speech === 'stub') await context.addInitScript(speechStub, {});
   else if (speech === 'none') await context.addInitScript(removeSpeech);
   else if (speech !== 'real') await context.addInitScript(speechStub, speech);
-  if (saved) {
+  for (const [key, value] of [[STORE_KEY, saved], [FACTS_KEY, savedFacts]]) {
+    if (!value) continue;
     await context.addInitScript(([key, value]) => {
       if (!window.localStorage.getItem(key)) window.localStorage.setItem(key, value);
-    }, [STORE_KEY, JSON.stringify(saved)]);
+    }, [key, typeof value === 'string' ? value : JSON.stringify(value)]);
   }
+  if (clock) await context.addInitScript(movableClock);
   if (storage === 'full') await context.addInitScript(fullStorage);
+  if (storage === 'picky') await context.addInitScript(fullStorage, false);
   if (storage === 'blocked') await context.addInitScript(blockedStorage);
   const page = await context.newPage();
   const problems = [];
@@ -243,6 +295,7 @@ async function hold(page, browserName, selector, ms) {
 }
 
 const readSaved = (page) => page.evaluate((key) => JSON.parse(window.localStorage.getItem(key) || 'null'), STORE_KEY);
+const readFacts = (page) => page.evaluate((key) => JSON.parse(window.localStorage.getItem(key) || 'null'), FACTS_KEY);
 const spokenList = (page) => page.evaluate(() => (window.__spoken || []).slice());
 const isShowing = (page, selector) => page.locator(selector).isVisible();
 
@@ -848,7 +901,12 @@ function solveBrew(seen) {
   let answer = NaN;
   let numbers = [];
   let solved = null;
-  if (seen.show === 'equation') {
+  if (seen.show === 'equation' && seen.equation[2] === '?') {
+    const [left, , , , sum] = seen.equation; // "7 + ? = 10"
+    answer = parseInt(sum, 10) - parseInt(left, 10);
+    numbers = [parseInt(left, 10), answer, parseInt(sum, 10)];
+    solved = new RegExp(`^${numbers[0]} \\+ ${answer} = ${numbers[2]}$`);
+  } else if (seen.show === 'equation') {
     const [left, op, right] = seen.equation;
     const a = parseInt(left, 10);
     const b = parseInt(right, 10);
@@ -892,6 +950,24 @@ function solveBrew(seen) {
     solved = new RegExp(`= ${answer}¢$`);
   }
   return { digits: String(answer), wrong: String(answer + 1), solved, numbers };
+}
+
+// Turns a recipe into what readBrew() would see on screen, so the same solver checks both.
+function asSeen(problem) {
+  const show = problem.show;
+  return {
+    topic: problem.topic,
+    show: show.type,
+    title: problem.title,
+    equation: show.parts || [],
+    rods: show.tens,
+    cubes: show.ones,
+    sequence: (show.items || []).map((n) => (n === null ? '?' : String(n))),
+    story: (show.lines || []).join(' '),
+    hourTurn: show.type === 'clock' ? (show.hour % 12) * 30 + show.minute / 2 : null,
+    minuteTurn: show.type === 'clock' ? show.minute * 6 : null,
+    coins: show.cents || [],
+  };
 }
 
 // Two turns show the same problem if everything on screen is the same.
@@ -941,6 +1017,15 @@ async function checkBrewPicture(page, label) {
 
 async function tapDigits(page, digits) {
   for (const digit of digits) await tap(page, `#brew-tiles .tile[data-digit="${digit}"]`);
+}
+
+// Home -> the Potions menu -> a round. `card` is the menu button to tap:
+// mixed potions unless a drill or a speedy brew is asked for.
+async function startPotions(page, card = '#btn-mix') {
+  await tap(page, '#btn-potions');
+  await page.waitForSelector('#screen-potions:not([hidden])');
+  await tap(page, card);
+  await page.waitForSelector('#screen-brew:not([hidden])');
 }
 
 async function brewAndSeeResult(page) {
@@ -1005,24 +1090,6 @@ async function potionRecipes(browser, baseUrl) {
   check(JSON.stringify(data.topics.map((t) => t.id)) === JSON.stringify(ALL_TOPICS), 'recipes: all the topics are there',
     data.topics.map((t) => t.id).join(','));
   check(data.topics.every((t) => t.name && t.icon && /^#[0-9a-f]{6}$/.test(t.color)), 'recipes: every topic has a name, icon and potion color');
-
-  // Turns a recipe into what readBrew() would see on screen, so the same solver checks both.
-  const asSeen = (problem) => {
-    const show = problem.show;
-    return {
-      topic: problem.topic,
-      show: show.type,
-      title: problem.title,
-      equation: show.parts || [],
-      rods: show.tens,
-      cubes: show.ones,
-      sequence: (show.items || []).map((n) => (n === null ? '?' : String(n))),
-      story: (show.lines || []).join(' '),
-      hourTurn: show.type === 'clock' ? (show.hour % 12) * 30 + show.minute / 2 : null,
-      minuteTurn: show.type === 'clock' ? show.minute * 6 : null,
-      coins: show.cents || [],
-    };
-  };
 
   for (const [name, list] of Object.entries(data.samples)) {
     const [topic, level] = name.split('/');
@@ -1157,8 +1224,7 @@ async function potionsRound(browser, baseUrl, size) {
   check((await spokenList(page)).length === 0, `${tag}: nothing is spoken before a mode button is tapped`);
 
   // ---- the Potions button starts a round and unlocks speech
-  await tap(page, '#btn-potions');
-  await page.waitForSelector('#screen-brew:not([hidden])');
+  await startPotions(page);
   check(!(await isShowing(page, '#screen-play')), `${tag}: Potions opens the brewing screen, not the spelling one`);
   let spoken = await spokenList(page);
   check(spoken.length >= 2, `${tag}: speechSynthesis.speak was called after tapping Potions`, `calls: ${spoken.length}`);
@@ -1331,8 +1397,7 @@ async function potionsRound(browser, baseUrl, size) {
   await page.waitForSelector('#screen-home:not([hidden])');
 
   // ---- quitting a potion round and starting again
-  await tap(page, '#btn-potions');
-  await page.waitForSelector('#screen-brew:not([hidden])');
+  await startPotions(page);
   check((await page.locator('#brew-progress .rp-star').count()) === 8 && (await page.locator('#brew-progress .rp-star.is-done').count()) === 0,
     `${tag}: a new round starts with 8 empty progress stars`);
   await tap(page, '#btn-brew-quit');
@@ -1411,8 +1476,7 @@ async function potionsSettings(browser, browserName, baseUrl) {
   await tap(page, '#screen-parent .parent-buttons-end [data-go="home"]');
 
   // ---- the next round follows them: only taking away, within 20
-  await tap(page, '#btn-potions');
-  await page.waitForSelector('#screen-brew:not([hidden])');
+  await startPotions(page);
   let turns = 0;
   while (!(await isShowing(page, '#screen-done'))) {
     turns += 1;
@@ -1443,8 +1507,7 @@ async function potionsSettings(browser, browserName, baseUrl) {
     `${tag}: topics can be switched back on`, JSON.stringify(saved.math));
   check(/8 potions brewed/.test(await page.locator('#parent-progress').innerText()), `${tag}: the grown-up sees how many potions were brewed`);
   await tap(page, '#screen-parent .parent-buttons-end [data-go="home"]');
-  await tap(page, '#btn-potions');
-  await page.waitForSelector('#screen-brew:not([hidden])');
+  await startPotions(page);
   let seen = await readBrew(page);
   check(['time', 'coins'].includes(seen.topic), `${tag}: the new topics are used right away`, seen.topic);
   await tap(page, '#btn-brew-quit');
@@ -1500,8 +1563,7 @@ async function potionsTight(browser, baseUrl) {
       ];
       P.makeRound = () => round;
     });
-    await tap(page, '#btn-potions');
-    await page.waitForSelector('#screen-brew:not([hidden])');
+    await startPotions(page);
     for (let i = 0; i < answers.length; i++) {
       const seen = await readBrew(page);
       const want = solveBrew(seen);
@@ -1536,8 +1598,7 @@ async function potionsQuiet(browser, baseUrl) {
   for (const size of [SIZES[0], TIGHT_SIZES[3]]) {
     const tag = `potions without speech (${size.name})`;
     const { context, page, problems } = await openPage(browser, baseUrl, size, { speech: 'none' });
-    await tap(page, '#btn-potions');
-    await page.waitForSelector('#screen-brew:not([hidden])');
+    await startPotions(page);
     check(await isShowing(page, '#screen-brew [data-speech-note]'), `${tag}: a friendly note is shown`);
     check(!(await isShowing(page, '#btn-brew-hear')) && !(await isShowing(page, '#btn-brew-slow')), `${tag}: the Hear buttons are hidden`);
     for (let i = 0; i < 3; i++) {
@@ -1560,8 +1621,7 @@ async function potionsQuiet(browser, baseUrl) {
 
   // The browser's own speech engine, untouched (headless browsers usually have no voices).
   const real = await openPage(browser, baseUrl, SIZES[1], { speech: 'real' });
-  await tap(real.page, '#btn-potions');
-  await real.page.waitForSelector('#screen-brew:not([hidden])');
+  await startPotions(real.page);
   await sleep(1700);
   const voices = await real.page.evaluate(() => ('speechSynthesis' in window && window.speechSynthesis ? window.speechSynthesis.getVoices().length : -1));
   const hearShown = await isShowing(real.page, '#btn-brew-hear');
@@ -1576,8 +1636,7 @@ async function potionsQuiet(browser, baseUrl) {
   // Reduced motion: the cauldron stops bubbling and nothing flies around.
   const calm = await openPage(browser, baseUrl, SIZES[1], { reducedMotion: 'reduce' });
   const running = () => calm.page.evaluate(() => document.getAnimations().filter((a) => a.playState === 'running').length);
-  await tap(calm.page, '#btn-potions');
-  await calm.page.waitForSelector('#screen-brew:not([hidden])');
+  await startPotions(calm.page);
   await sleep(200);
   check((await running()) === 0, 'potions with reduced motion: nothing animates on the brewing screen', String(await running()));
   const seen = await readBrew(calm.page);
@@ -1637,8 +1696,7 @@ async function localVoicesOnly(browser, browserName, baseUrl) {
   await tap(page, '#btn-book');
   await tap(page, '.book-word[data-word="magic"]');
   await tap(page, '#screen-book [data-go="home"]');
-  await tap(page, '#btn-potions');
-  await page.waitForSelector('#screen-brew:not([hidden])');
+  await startPotions(page);
   await tap(page, '#btn-brew-hear');
   await tap(page, '#btn-brew-quit');
   await openParent(page);
@@ -1679,8 +1737,7 @@ async function localVoicesOnly(browser, browserName, baseUrl) {
     await tap(page, '#btn-book');
     await tap(page, '.book-word[data-word="magic"]');
     await tap(page, '#screen-book [data-go="home"]');
-    await tap(page, '#btn-potions');
-    await page.waitForSelector('#screen-brew:not([hidden])');
+    await startPotions(page);
     check(await isShowing(page, '#screen-brew [data-speech-note]') && !(await isShowing(page, '#btn-brew-hear')),
       `${tag}: Potions shows its note instead of the Hear buttons`);
     const seen = await readBrew(page);
@@ -1791,8 +1848,7 @@ async function speechFailures(browser, baseUrl) {
   // Potions: the recipe is always on screen, so the Hear buttons simply stay for another try.
   const tag = 'speech error in Potions';
   const { context, page, problems } = await openPage(browser, baseUrl, TIGHT_SIZES[3], { speech: { error: 'not-allowed' }, reducedMotion: 'reduce' });
-  await tap(page, '#btn-potions');
-  await page.waitForSelector('#screen-brew:not([hidden])');
+  await startPotions(page);
   await sleep(1500);
   const hear = await isShowing(page, '#btn-brew-hear');
   const note = await isShowing(page, '#screen-brew [data-speech-note]');
@@ -1888,8 +1944,7 @@ async function voiceListRefresh(browser, browserName, baseUrl) {
   check(await isShowing(page, '#screen-home [data-speech-note]'), `${tag}: the home screen still says there is no voice right now`);
 
   tag = 'voice list refreshed in Potions';
-  await tap(page, '#btn-potions'); // tries the voice (it fails again) and starts the delayed voice check
-  await page.waitForSelector('#screen-brew:not([hidden])');
+  await startPotions(page); // tries the voice (it fails again) and starts the delayed voice check
   const brewOffers = async () => `hear ${await isShowing(page, '#btn-brew-hear')}, note ${await isShowing(page, '#screen-brew [data-speech-note]')}`;
   check(await brewOffers() === 'hear true, note false', `${tag}: a failed voice keeps the Hear buttons, the recipe is on screen anyway`, await brewOffers());
   await setVoices(page, []);
@@ -2205,8 +2260,7 @@ async function easySkipRound(browser, baseUrl) {
   const tag = 'easy skip counting';
   const topics = Object.fromEntries(ALL_TOPICS.map((id) => [id, id === 'skip']));
   const { context, page, problems } = await openPage(browser, baseUrl, SIZES[0], { saved: { math: { level: 'easy', topics, brewed: 0 } }, reducedMotion: 'reduce' });
-  await tap(page, '#btn-potions');
-  await page.waitForSelector('#screen-brew:not([hidden])');
+  await startPotions(page);
   const steps = new Set();
   let turns = 0;
   while (!(await isShowing(page, '#screen-done'))) {
@@ -2307,8 +2361,7 @@ async function failedSave(browser, browserName, baseUrl) {
   check(await isShowing(page, '#save-note'), `${tag}: the notice appears as soon as a save fails`);
   check((await readSaved(page)).roundSize !== 8, `${tag}: the failed change is not in localStorage`);
   await goHome();
-  await tap(page, '#btn-potions');
-  await page.waitForSelector('#screen-brew:not([hidden])');
+  await startPotions(page);
   const seen = await readBrew(page);
   await tapDigits(page, solveBrew(seen).digits);
   check((await brewAndSeeResult(page)) === 'brewed', `${tag}: potions still brew while saving fails`);
@@ -2450,8 +2503,7 @@ async function keyboardCannotAnswer(browser, baseUrl) {
   tag = 'potions with a keyboard';
   const potions = await openPage(browser, baseUrl, SIZES[1], { reducedMotion: 'reduce' });
   page = potions.page;
-  await tap(page, '#btn-potions');
-  await page.waitForSelector('#screen-brew:not([hidden])');
+  await startPotions(page);
   const want = solveBrew(await readBrew(page));
   for (const key of [...want.digits, '9', 'Backspace', 'Enter']) await page.keyboard.press(key);
   await sleep(400);
@@ -2471,6 +2523,1815 @@ async function keyboardCannotAnswer(browser, baseUrl) {
     `${tag}: a focused Brew button still answers to Enter, like any button`);
   check(potions.problems.length === 0, `${tag}: no console errors`, potions.problems.slice(0, 3).join(' | '));
   await potions.context.close();
+}
+
+// ================================================================ math fluency (MATH-BRIEF.md)
+// Ten-frames, the counting-on hint, the Make 10 and Doubles drills, the optional
+// speedy brew, and the fact memory with its slow-facts list for grown-ups.
+
+const DAY = 24 * 60 * 60 * 1000;
+const DRILLS = ['make10', 'doubles'];
+const MAIN_SAVE_KEYS = ['words', 'custom', 'roundSize', 'progress', 'math', 'stars', 'robe', 'familiar', 'chimes'];
+
+// One saved fact for a seeded fact memory. `due` says whether its wait is over.
+function savedFact(box, { due = false, miss = false, pace = 'quick', times = [3000], seen = 3, right = 3 } = {}) {
+  const now = Date.now();
+  const last = due ? now - 40 * DAY : now - 60 * 1000;
+  return { box, due: due ? now - DAY : now + 2 * DAY, seen, right, times, last, miss, pace };
+}
+
+// The next potion round is made of these recipes, e.g. [['add', 3, 8], ['makeTen', 7]].
+async function useRound(page, recipes) {
+  await page.evaluate((recipes) => {
+    const P = window.SPELLCASTER_POTIONS;
+    const round = recipes.map(([name, ...numbers]) => P.build[name](...numbers));
+    P.makeRound = () => round;
+  }, recipes);
+}
+
+// What the help for an addition fact shows right now: the buttons, and the
+// ten-frames or the hint under the sum.
+async function readHelp(page) {
+  return page.evaluate(() => {
+    const shown = (node) => !!node && node.offsetParent !== null;
+    const helper = document.querySelector('#brew-helper');
+    const note = document.querySelector('#brew-note');
+    const texts = (sel) => [...helper.querySelectorAll(sel)].map((node) => node.textContent.trim());
+    const frames = helper.querySelector('.frames');
+    return {
+      buttons: ['dots', 'hint'].filter((name) => shown(document.querySelector(`#btn-${name}`))),
+      pressed: ['dots', 'hint'].filter((name) => document.querySelector(`#btn-${name}`).getAttribute('aria-pressed') === 'true'),
+      open: shown(helper),
+      view: shown(helper) ? helper.dataset.view : '',
+      // One string per frame, one letter per place: a, b, x (the "1 more" of a near double) or . (empty)
+      frames: [...helper.querySelectorAll('.frame')].map((frame) => [...frame.children].map((cell) => {
+        const dot = cell.querySelector('.dot');
+        return !dot ? '.' : dot.classList.contains('dot-extra') ? 'x' : dot.classList.contains('dot-b') ? 'b' : 'a';
+      }).join('')),
+      framesLabel: frames ? frames.getAttribute('aria-label') : '',
+      caption: texts('.hint-caption').join(' '),
+      start: texts('.hop-start').join(' '),
+      hops: texts('.hop-dot'),
+      steps: texts('.step'),
+      seenHops: [...helper.querySelectorAll('.hop')].filter((hop) => Number(getComputedStyle(hop).opacity) > 0.5).length,
+      note: shown(note) ? note.textContent.trim() : '',
+      mode: document.querySelector('#screen-brew').dataset.mode,
+    };
+  });
+}
+
+// What the help should show, worked out from the sum on screen (never from the game's own data).
+function expectHelp(seen) {
+  const fill = (text, length) => text.padEnd(length, '.');
+  const count = (from, to) => Array.from({ length: to - from + 1 }, (_, i) => String(from + i));
+  const a = parseInt(seen.equation[0], 10);
+  if (seen.equation[2] === '?') {
+    // Make 10: one frame with what is there; hop up to 10.
+    return { frames: [fill('a'.repeat(a), 10)], start: String(a), hops: count(a + 1, 10), steps: [], caption: /up to 10/, say: new RegExp(`Start at ${a} and hop up to 10`) };
+  }
+  const b = parseInt(seen.equation[2], 10);
+  const big = Math.max(a, b);
+  const small = Math.min(a, b);
+  const all = fill('a'.repeat(a) + 'b'.repeat(b), 20);
+  const hops = count(big + 1, a + b - 1).concat('?');
+  const counting = { start: String(big), hops, steps: [], caption: a === b ? new RegExp(`Start from ${big}`) : /bigger number/,
+    say: new RegExp(`${a === b ? `Start from ${big}` : `Start from the bigger number, ${big}`}\\. Then count on ${small} more\\.`) };
+  if (seen.title === 'Make 10 first') {
+    const first = 10 - a;
+    return { frames: [all.slice(0, 10), all.slice(10)], start: '', hops: [], steps: [`${a} + ${first} = 10`, `10 + ${b - first} = ?`],
+      caption: new RegExp(`Make 10 first! ${b} is ${first} and ${b - first}\\.`), say: new RegExp(`${a} plus ${first} makes 10\\. Then add ${b - first} more\\.`) };
+  }
+  if (seen.title === 'Doubles') return { ...counting, frames: [fill('a'.repeat(a), 10), fill('b'.repeat(b), 10)] };
+  if (seen.title === 'Double and 1 more') {
+    const one = a > b ? [fill(`${'a'.repeat(a - 1)}x`, 10), fill('b'.repeat(b), 10)] : [fill('a'.repeat(a), 10), fill(`${'b'.repeat(b - 1)}x`, 10)];
+    return { frames: one, start: '', hops: [], steps: [`${small} + ${small} = ${2 * small}`, `${2 * small} + 1 = ?`],
+      caption: new RegExp(`Use a double! ${small + 1} is ${small} and 1 more\\.`), say: new RegExp(`${small} plus ${small} is ${2 * small}\\. Then add 1 more\\.`) };
+  }
+  return { ...counting, frames: [all.slice(0, 10), all.slice(10)] };
+}
+
+// The ten-frames or the hint must sit between the sum and the help buttons,
+// inside the card, in one row, and be big enough to read.
+async function checkHelperFits(page, label) {
+  const report = await page.evaluate(() => {
+    const problems = [];
+    const helper = document.querySelector('#brew-helper');
+    if (helper.offsetParent === null) return ['the helper is not showing'];
+    const card = document.querySelector('#screen-brew .prompt-card').getBoundingClientRect();
+    const zone = helper.getBoundingClientRect();
+    const sum = document.querySelector('#brew-art .eq').getBoundingClientRect();
+    const help = document.querySelector('#brew-help').getBoundingClientRect();
+    const listen = [...document.querySelectorAll('#brew-listen:not([hidden]) button')].map((btn) => btn.getBoundingClientRect());
+    if (zone.top < sum.bottom - 1) problems.push('the helper overlaps the sum');
+    if (zone.bottom > help.top + 1) problems.push('the helper overlaps the help buttons');
+    if (sum.left < card.left || sum.right > card.right || parseFloat(getComputedStyle(document.querySelector('#brew-art .eq')).fontSize) < 28) problems.push('the sum is cut off or tiny');
+    const parts = [...helper.querySelectorAll('.frame, .cell, .dot, .hint-caption, .hop-start, .hop-dot, .step')];
+    if (!parts.length) problems.push('nothing is drawn in the helper');
+    for (const node of parts) {
+      const b = node.getBoundingClientRect();
+      const name = node.className.split(' ')[0];
+      if (b.width < 4 || b.height < 4) problems.push(`${name} is too small to see`);
+      if (b.left < zone.left - 0.5 || b.right > zone.right + 0.5 || b.top < zone.top - 1.5 || b.bottom > zone.bottom + 1.5) problems.push(`${name} spills out of the helper`);
+      if (b.left < card.left || b.right > card.right || b.bottom > card.bottom) problems.push(`${name} spills out of the card`);
+      if (listen.some((l) => b.left < l.right && b.right > l.left && b.top < l.bottom && b.bottom > l.top)) problems.push(`a listen button covers ${name}`);
+    }
+    const tooSmall = (sel, min, what) => {
+      const small = [...helper.querySelectorAll(sel)].map((node) => node.getBoundingClientRect()).find((b) => b.width < min || b.height < min);
+      if (small) problems.push(`${what} is only ${Math.round(small.width)}x${Math.round(small.height)}px`);
+    };
+    tooSmall('.dot', 16, 'a dot');
+    tooSmall('.hop-dot', 24, 'a hop');
+    tooSmall('.hop-start', 36, 'the number to start from');
+    for (const node of helper.querySelectorAll('.hint-caption, .hop-dot, .hop-start, .step')) {
+      if (parseFloat(getComputedStyle(node).fontSize) < 14) { problems.push(`${node.className.split(' ')[0]} is written tiny`); break; }
+    }
+    for (const sel of ['.hop-dot', '.step', '.frame']) {
+      if (new Set([...helper.querySelectorAll(sel)].map((node) => Math.round(node.getBoundingClientRect().top))).size > 1) problems.push(`${sel} is not in one row`);
+    }
+    const caption = helper.querySelector('.hint-caption');
+    if (caption && caption.scrollWidth > caption.clientWidth + 1) problems.push('the hint words are cut off');
+    return [...new Set(problems)];
+  });
+  check(report.length === 0, `${label}: the helper fits under the sum`, report.slice(0, 4).join('; '));
+}
+
+// Where the rows under the card are. Opening the help must not move any of them.
+const rowsBelow = (page) => page.evaluate(() => ['#screen-brew .prompt-card', '#brew-slots', '#brew-tiles', '#btn-brew']
+  .map((sel) => {
+    const box = document.querySelector(sel).getBoundingClientRect();
+    return `${Math.round(box.top)}+${Math.round(box.height)}`;
+  }).join(' '));
+
+// Solves the potion on screen by tapping. Returns what was seen and how it went.
+async function brewOne(page, { miss = false } = {}) {
+  const seen = await readBrew(page);
+  const want = solveBrew(seen);
+  await tapDigits(page, miss ? want.wrong : want.digits);
+  const kind = await brewAndSeeResult(page);
+  const shown = await page.locator('#result-word').getAttribute('aria-label');
+  return { seen, want, kind, shown };
+}
+
+// A speedy brew has no result card: after Brew the next potion simply arrives.
+async function speedyOne(page, turn, { miss = false, think = 0 } = {}) {
+  const seen = await readBrew(page);
+  const want = solveBrew(seen);
+  if (think) {
+    await sleep(60); // the stopwatch leaves out the time the voice is talking, so let it finish first
+    await page.evaluate((ms) => window.__wait(ms), think);
+  }
+  await tapDigits(page, miss ? want.wrong : want.digits);
+  await tap(page, '#btn-brew');
+  await sleep(120);
+  const after = { result: await isShowing(page, '#result'), help: await readHelp(page) };
+  await page.waitForFunction((turn) => {
+    if (!document.querySelector('#screen-done').hidden) return true;
+    const done = document.querySelectorAll('#brew-progress .rp-star.is-done, #brew-progress .rp-star.is-tried').length;
+    return done === turn && !document.querySelector('#brew-tiles .tile').disabled && !document.querySelector('#brew-slots .slot.is-filled');
+  }, turn, { timeout: 6000 });
+  return { seen, want, ...after };
+}
+
+// ---------------------------------------------------------------- math scenario: the fact memory and the drill recipes
+
+// Plain functions, so thousands of answers and whole years of waiting take no time.
+async function factMemory(browser, baseUrl) {
+  const tag = 'fact memory';
+  const { context, page, problems } = await openPage(browser, baseUrl, SIZES[0]);
+  const data = await page.evaluate(() => {
+    const F = window.SPELLCASTER_FACTS;
+    const P = window.SPELLCASTER_POTIONS;
+    const MIN = 60 * 1000;
+    const DAY = 24 * 60 * MIN;
+    const quick = { ok: true, ms: 2500, helped: false };
+    const slow = { ok: true, ms: 9000, helped: false };
+    const helped = { ok: true, ms: 2500, helped: true };
+    const away = { ok: true, ms: NaN, helped: false };
+    const miss = { ok: false, ms: 2500, helped: false };
+    const copy = (value) => JSON.parse(JSON.stringify(value));
+    const t0 = 1700000000000;
+    const out = { QUICK_MS: F.QUICK_MS, QUICK_BOX: F.QUICK_BOX, GAPS: F.GAPS };
+
+    // One fact, answered quickly again and again in a single sitting, a minute apart.
+    let store = F.fresh();
+    out.sitting = [1, 2, 3, 4, 5, 6].map((n) => copy(F.record(store, '8+5', quick, t0 + n * MIN)));
+    out.sittingQuick = [F.isQuick(store, '8+5'), F.quickCount(store, ['8+5', '9+4'])];
+    // The same fact asked again each time its wait is over: the waits grow.
+    store = F.fresh();
+    let now = t0;
+    out.spaced = [];
+    for (let n = 0; n < 7; n++) {
+      const f = F.record(store, '8+5', quick, now);
+      out.spaced.push({ box: f.box, wait: f.due - now });
+      now = f.due + MIN;
+    }
+    // A known fact that goes wrong: slow, helped, away, missed.
+    const known = () => {
+      const s = F.fresh();
+      let at = t0;
+      for (let n = 0; n < 5; n++) at = F.record(s, '7+6', quick, at).due + MIN;
+      return { s, at };
+    };
+    out.after = {};
+    for (const [name, answer] of Object.entries({ quick, slow, helped, away, miss })) {
+      const { s, at } = known();
+      const before = F.get(s, '7+6').box;
+      const f = F.record(s, '7+6', answer, at);
+      out.after[name] = { before, box: f.box, wait: f.due - at, miss: f.miss, pace: f.pace, times: f.times.length, listed: F.slowList(s).map((row) => `${row.key}:${row.why}:${row.ms}`).join() };
+    }
+    // A brand new fact answered slowly, with help, or wrong.
+    out.first = {};
+    for (const [name, answer] of Object.entries({ slow, helped, away, miss })) {
+      const s = F.fresh();
+      const f = F.record(s, '6+?=10', answer, t0);
+      out.first[name] = { box: f.box, wait: f.due - t0, seen: f.seen, right: f.right, times: f.times.length };
+    }
+    // A slow fact that is then answered quickly leaves the list again.
+    store = F.fresh();
+    F.record(store, '9+4', slow, t0);
+    F.record(store, '9+4', quick, t0 + 20 * MIN);
+    out.mended = { listed: F.slowList(store).length, box: F.get(store, '9+4').box };
+    // A clock that is set back must not hide a fact for good.
+    store = F.fresh();
+    for (let n = 0; n < 4; n++) F.record(store, '9+4', quick, t0 + n);
+    out.clockBack = F.rank(store, ['9+4', '9+5'], t0 - 400 * DAY);
+
+    // Which facts come first: missed, then due (lowest box first), then new, then the ones that can wait.
+    store = F.fresh();
+    F.record(store, '9+2', miss, t0);                                  // missed
+    F.record(store, '9+3', slow, t0);                                  // due again after ten minutes
+    for (let n = 0; n < 2; n++) F.record(store, '9+4', quick, t0);      // box 2: due after a day
+    for (let n = 0; n < 3; n++) F.record(store, '9+5', quick, t0);      // box 3: due after three days
+    F.record(store, '4+?=10', miss, t0);                                // a make-10 pair, missed
+    const keys = ['9+5', '9+6', '9+4', '9+3', '9+2'];
+    out.rankSoon = Array.from({ length: 20 }, () => F.rank(store, keys, t0 + MIN).join(' '));
+    out.rankLater = F.rank(store, keys, t0 + 2 * DAY).join(' ');
+    out.reviewSoon = F.review(store, t0 + MIN, 5);
+    out.reviewLater = F.review(store, t0 + 2 * DAY, 5);
+    out.reviewOne = F.review(store, t0 + 2 * DAY, 1);
+    out.summary = F.summary(store);
+    out.slowList = F.slowList(store).map((row) => `${row.key}:${row.why}`);
+
+    // Speedy brews: unlocking sticks, and the best run is kept.
+    store = F.fresh();
+    out.speedy = [];
+    out.speedy.push(F.isUnlocked(store, 'make10'), F.unlock(store, 'make10'), F.unlock(store, 'make10'), F.isUnlocked(store, 'make10'), F.isUnlocked(store, 'doubles'));
+    out.runs = [
+      F.saveRun(store, 'make10', { right: 6, total: 8, ms: 40000 }),
+      F.saveRun(store, 'make10', { right: 6, total: 8, ms: 45000 }), // slower: not a best
+      F.saveRun(store, 'make10', { right: 6, total: 8, ms: 30000 }), // faster: a best
+      F.saveRun(store, 'make10', { right: 8, total: 8, ms: 90000 }), // more potions: a best, though slower
+      F.saveRun(store, 'make10', { right: 7, total: 8, ms: 10000 }), // fewer potions: not a best
+    ].map((result) => copy(result));
+    out.bestKept = copy(F.speedOf(store, 'make10'));
+
+    // Whatever was saved, the store that comes back is safe to use.
+    const good = F.fresh();
+    F.record(good, '8+5', quick, t0);
+    F.record(good, '7+?=10', miss, t0);
+    F.saveRun(good, 'doubles', { right: 8, total: 8, ms: 31000 });
+    out.roundTrip = JSON.stringify(F.clean(copy(good))) === JSON.stringify(good);
+    const junk = [null, 7, 'facts', [], { facts: 7, speed: 'fast' }, { facts: [1, 2], speed: [3] },
+      { facts: { '8+5': null, '9+9': 'yes', '7+7': { seen: 'many' } }, speed: { make10: 7 } }];
+    out.junk = junk.map((value) => {
+      try {
+        const cleaned = F.clean(value);
+        return Object.keys(cleaned.facts).length + Object.keys(cleaned.speed).length;
+      } catch (err) {
+        return `threw ${err.message}`;
+      }
+    });
+    const odd = F.clean(JSON.parse('{"facts":{"constructor":{"seen":2,"box":3},"__proto__":{"seen":2,"box":3},"toString":{"seen":1},"8 + 5":{"seen":1},"123+4":{"seen":1},' +
+      '"8+5":{"seen":4,"right":9,"box":99,"due":9e15,"last":1700000000000,"times":[1500,"x",-4,1e9,2000.6],"miss":false,"pace":"zoom"},' +
+      '"6+6":{"seen":3,"right":1,"box":4,"miss":true,"pace":"slow","times":"none"},"7+?=10":{"seen":1.9,"right":1,"box":1}},' +
+      '"speed":{"make10":{"unlocked":"yes","plays":-2,"best":{"right":12,"total":8,"ms":20000}},"doubles":{"unlocked":true,"plays":3.7,"best":{"right":8,"total":8,"ms":-5}},"Bad Id!":{"unlocked":true}}}'));
+    out.odd = copy(odd);
+    out.oddProto = Object.getPrototypeOf(odd.facts) === null && Object.getPrototypeOf(odd.speed) === null && F.get(odd, 'constructor') === null && F.get(odd, 'toString') === null;
+    const full = F.fresh();
+    for (let a = 1; a < 100 && Object.keys(full.facts).length < 500; a++) for (let b = 1; b < 20; b++) F.record(full, `${a}+${b}`, quick, t0);
+    out.fullCount = Object.keys(full.facts).length;
+    out.badKey = [F.record(F.fresh(), 'constructor', quick, t0), F.record(F.fresh(), '8-5', quick, t0)];
+
+    // The drills and their facts, straight from the recipes.
+    out.drills = P.drills.map((drill) => ({ ...drill, ...P.drillFacts(drill.id) }));
+    out.topics = P.topics.map((topic) => topic.id);
+    out.facts = { within: P.build.add(12, 8).fact, over: P.build.add(12, 9).fact, big: P.build.add(34, 20).fact, sub: P.build.sub(13, 5).fact, story: P.build.story(0, 3, 4).fact, easy: Array.from({ length: 300 }, () => P.makeProblem('add', 'easy')) };
+    const only = (ids) => Object.fromEntries(P.topics.map((topic) => [topic.id, ids.includes(topic.id)]));
+    const keysOf = (settings, review) => Array.from({ length: 30 }, () => P.makeRound(settings, 8, review).map((problem) => problem.key));
+    out.rounds = {
+      review: keysOf({ level: 'hundred', topics: only(P.topics.map((topic) => topic.id)) }, [[8, 5]]),
+      reviewEasy: keysOf({ level: 'easy', topics: only(['add']) }, [[8, 5], [9, 4], [7, 6]]),
+      noAdd: keysOf({ level: 'hundred', topics: only(['sub', 'time']) }, [[8, 5]]),
+      plain: keysOf({ level: 'hundred', topics: only(['add', 'sub']) }),
+    };
+    return out;
+  });
+
+  // ---- boxes: quick answers move a fact up, and its wait grows
+  check(data.QUICK_MS >= 4000 && data.QUICK_MS <= 8000, `${tag}: a quick answer is one within a few seconds`, String(data.QUICK_MS));
+  check(data.GAPS.every((gap, i) => !i || gap > data.GAPS[i - 1]) && data.GAPS[0] === 0 && data.GAPS[2] >= DAY, `${tag}: the waits grow from box to box, from "now" to days`, data.GAPS.join(','));
+  check(data.sitting.map((f) => f.box).join() === '1,2,3,3,3,3', `${tag}: three quick answers make a fact quick, and one sitting cannot push it further`, data.sitting.map((f) => f.box).join());
+  check(data.sitting[2].due === data.sitting[5].due, `${tag}: asking a quick fact early does not move the day it is due`);
+  check(data.sitting[5].seen === 6 && data.sitting[5].right === 6 && data.sitting[5].times.length === 5, `${tag}: answers are counted, and the last five times are kept`, JSON.stringify(data.sitting[5]));
+  check(data.sittingQuick.join() === 'true,1', `${tag}: a fact in box ${data.QUICK_BOX} counts as quick`, data.sittingQuick.join());
+  check(data.spaced.map((s) => s.box).join() === '1,2,3,4,5,5,5', `${tag}: a fact asked when it is due climbs to the top box`, data.spaced.map((s) => s.box).join());
+  check(data.spaced.slice(0, 5).every((s, i) => s.wait === data.GAPS[i + 1]), `${tag}: each box waits longer than the one before (growing intervals)`, data.spaced.map((s) => Math.round(s.wait / 60000)).join(' min, '));
+
+  // ---- slow, helped and missed facts come back sooner
+  const { after, first } = data;
+  check(after.quick.box === after.quick.before && after.quick.listed === '', `${tag}: a quick answer keeps a known fact in the top box and off the slow list`, JSON.stringify(after.quick));
+  check(after.slow.box === after.slow.before - 1 && after.slow.wait === data.GAPS[1], `${tag}: a slow answer costs one box and brings the fact back soon`, JSON.stringify(after.slow));
+  check(after.slow.listed === '7+6:slow:9000', `${tag}: a slow fact is listed with the time it took`, after.slow.listed);
+  check(after.helped.box === 1 && after.helped.wait === data.GAPS[1] && after.helped.listed === '7+6:helped:null', `${tag}: an answer that needed the dots or the hint goes back to box 1 and is listed`, JSON.stringify(after.helped));
+  check(first.helped.times === 0 && first.away.times === 0 && first.slow.times === 1, `${tag}: only an answer without help is kept as a recall time`, JSON.stringify(first));
+  check(after.away.box === after.away.before && after.away.listed === '' && after.away.pace === 'quick' && after.away.wait === -60000,
+    `${tag}: an answer nobody could time changes nothing: not the box, not the day it is due, not what it was last time`, JSON.stringify(after.away));
+  check(after.miss.box === 0 && after.miss.wait === 0 && after.miss.miss === true && after.miss.listed === '7+6:missed:null', `${tag}: a missed fact drops to box 0, is due at once and is listed`, JSON.stringify(after.miss));
+  check(first.slow.box === 1 && first.helped.box === 1 && first.away.box === 1 && first.miss.box === 0, `${tag}: a new fact starts in box 1 when right and box 0 when missed`, JSON.stringify(first));
+  check(first.miss.seen === 1 && first.miss.right === 0 && first.slow.right === 1, `${tag}: right and wrong answers are counted apart`, JSON.stringify(first));
+  check(data.mended.listed === 0 && data.mended.box === 2, `${tag}: a slow fact that is then answered quickly leaves the slow list`, JSON.stringify(data.mended));
+  check(data.clockBack[0] === '9+4', `${tag}: a clock set back does not hide a fact for good`, data.clockBack.join(' '));
+
+  // ---- which facts come first
+  check(new Set(data.rankSoon).size === 1 && data.rankSoon[0] === '9+2 9+6 9+3 9+4 9+5', `${tag}: missed facts come first, then new ones, then the ones that can wait`, data.rankSoon[0]);
+  check(data.rankLater === '9+2 9+3 9+4 9+6 9+5', `${tag}: once their wait is over, facts come before new ones, lowest box first`, data.rankLater);
+  check(JSON.stringify(data.reviewSoon) === '[[9,2]]', `${tag}: a mixed round reviews missed facts at once`, JSON.stringify(data.reviewSoon));
+  check(JSON.stringify(data.reviewLater) === '[[9,2],[9,3],[9,4]]', `${tag}: ... then slow facts and the others whose wait is over, but never one that can still wait, or a make-10 pair`, JSON.stringify(data.reviewLater));
+  check(JSON.stringify(data.reviewOne) === '[[9,2]]', `${tag}: the review list keeps to its limit, most in need first`, JSON.stringify(data.reviewOne));
+  check(data.summary.practiced === 5 && data.summary.quick === 1 && data.summary.slow === 3, `${tag}: the summary counts practiced, quick and slow facts`, JSON.stringify(data.summary));
+  check(data.slowList.join() === '9+2:missed,4+?=10:missed,9+3:slow' || data.slowList.join() === '4+?=10:missed,9+2:missed,9+3:slow', `${tag}: the slow list puts missed facts first`, data.slowList.join());
+
+  // ---- speedy brews
+  check(data.speedy.join() === 'false,true,false,true,false', `${tag}: a speedy brew is unlocked once, for its own drill only`, data.speedy.join());
+  check(data.runs.map((run) => run.best).join() === 'true,false,true,true,false', `${tag}: more potions beat fewer, and the same number faster is a new best`, data.runs.map((run) => run.best).join());
+  check(data.runs[0].previous === null && data.runs[1].previous.ms === 40000, `${tag}: a run is told what the best was before`, JSON.stringify(data.runs.slice(0, 2)));
+  check(data.bestKept.unlocked && data.bestKept.plays === 5 && data.bestKept.best.right === 8 && data.bestKept.best.ms === 90000, `${tag}: the best run and the number of runs are kept`, JSON.stringify(data.bestKept));
+
+  // ---- damaged saves
+  check(data.roundTrip, `${tag}: a saved fact memory comes back exactly as it was`);
+  check(data.junk.every((count) => count === 0), `${tag}: a damaged fact memory becomes an empty one, without an error`, data.junk.join(','));
+  check(Object.keys(data.odd.facts).sort().join() === '6+6,7+?=10,8+5' && data.oddProto, `${tag}: only real fact names are kept from a save ("constructor" is not one)`, Object.keys(data.odd.facts).join());
+  const mended = data.odd.facts['8+5'];
+  check(mended.box === 5 && mended.right === 4 && mended.seen === 4 && mended.times.join() === '1500,2001' && mended.pace === 'away' && mended.due <= mended.last + data.GAPS[5],
+    `${tag}: odd numbers in a save are brought back into range`, JSON.stringify(mended));
+  check(data.odd.facts['6+6'].box === 0 && data.odd.facts['6+6'].times.length === 0 && data.odd.facts['7+?=10'].seen === 1, `${tag}: a missed fact is always in box 0`, JSON.stringify(data.odd.facts['6+6']));
+  check(Object.keys(data.odd.speed).sort().join() === 'doubles,make10' && data.odd.speed.make10.unlocked === false && data.odd.speed.make10.plays === 0 &&
+    data.odd.speed.make10.best.right === 8 && data.odd.speed.doubles.best === null && data.odd.speed.doubles.plays === 3,
+    `${tag}: odd speedy records are mended or dropped`, JSON.stringify(data.odd.speed));
+  check(data.fullCount <= 400, `${tag}: the fact memory cannot grow without end`, String(data.fullCount));
+  check(data.badKey.every((value) => value === null), `${tag}: something that is not an addition fact is never written down`);
+
+  // ---- the drills and their recipes
+  check(data.drills.map((drill) => drill.id).join() === DRILLS.join(), `${tag}: the drills are Make 10 and Doubles`, data.drills.map((drill) => drill.id).join());
+  check(data.drills.every((drill) => drill.name && drill.icon && drill.teaser && /^#[0-9a-f]{6}$/.test(drill.color)), `${tag}: every drill has a name, an icon and a potion color`);
+  check(JSON.stringify(data.topics) === JSON.stringify(ALL_TOPICS), `${tag}: drills are not topics (grown-ups do not switch them on or off)`, data.topics.join());
+  for (const drill of data.drills) {
+    const bad = [];
+    const note = (problem, why) => { if (bad.length < 3) bad.push(`${problem.key}: ${why}`); };
+    const all = drill.core.concat(drill.stretch);
+    for (const problem of all) {
+      const want = solveBrew(asSeen(problem));
+      const { fact } = problem;
+      if (problem.topic !== drill.id) note(problem, 'wrong drill');
+      if (want.digits !== problem.answer) note(problem, `answer ${problem.answer}, but the screen says ${want.digits}`);
+      if (!want.solved.test(problem.solved.join(''))) note(problem, `result card shows "${problem.solved.join('')}"`);
+      if (problem.solved[1] !== problem.answer) note(problem, 'the answer does not stand out on the result card');
+      if (!problem.title || problem.title.length > 26 || !problem.say || problem.say.length < 12 || !problem.sayAnswer) note(problem, 'title or words missing');
+      if (!problem.label || problem.label.length > 30 || !problem.label.endsWith(` = ${problem.show.parts[4] === '10' ? '10' : problem.answer}`)) note(problem, `label "${problem.label}"`);
+      if (!fact || fact.a < 1 || fact.b < 1 || fact.a + fact.b > 20) note(problem, 'not an addition fact within 20');
+      if (fact && fact.a + fact.b !== want.numbers[2] && fact.a + fact.b !== Number(want.digits)) note(problem, 'the fact does not match the sum');
+    }
+    check(bad.length === 0, `${tag}: all ${all.length} ${drill.name} facts are correct, within 20 and well worded`, bad.join(' | '));
+    check(new Set(all.map((problem) => problem.key)).size === all.length && new Set(all.map((problem) => problem.fact.key)).size === all.length, `${tag}: no ${drill.name} fact is there twice`);
+  }
+  const [make10, doubles] = data.drills;
+  check(make10.core.length === 9 && make10.core.every((p, i) => p.show.parts.join(' ') === `${i + 1} + ? = 10` && p.fact.key === `${i + 1}+?=10` && p.fact.hint === 'ten' && /^What goes with \d to make 10\?$/.test(p.say)),
+    `${tag}: Make 10 asks what goes with 1 to 9 to make 10`, make10.core.map((p) => p.show.parts.join('')).join(' '));
+  check(make10.stretch.length >= 12 && make10.stretch.every((p) => p.fact.a < 10 && p.fact.a > p.fact.b && p.fact.a + p.fact.b > 10 && p.fact.hint === 'bridge' && p.fact.key === `${p.fact.a}+${p.fact.b}`),
+    `${tag}: ... then sums that bridge through 10, bigger number first`, make10.stretch.map((p) => p.fact.key).join(' '));
+  const eightFive = make10.stretch.find((p) => p.fact.key === '8+5');
+  check(!!eightFive && eightFive.solved.join('') === '8 + 5 = 8 + 2 + 3 = 13' && eightFive.label === '8 + 5 = 13', `${tag}: 8 + 5 is shown as 8 + 2 + 3`, eightFive && eightFive.solved.join(''));
+  check(doubles.core.length === 10 && doubles.core.every((p, i) => p.fact.a === i + 1 && p.fact.b === i + 1 && p.fact.pair === true && p.fact.hint === 'count'),
+    `${tag}: Doubles asks 1 + 1 up to 10 + 10`, doubles.core.map((p) => p.fact.key).join(' '));
+  check(doubles.stretch.length >= 12 && doubles.stretch.every((p) => Math.abs(p.fact.a - p.fact.b) === 1 && p.fact.hint === 'near' && p.fact.pair === true) &&
+    doubles.stretch.some((p) => p.fact.a > p.fact.b) && doubles.stretch.some((p) => p.fact.a < p.fact.b),
+    `${tag}: ... then near doubles, both ways round`, doubles.stretch.map((p) => p.fact.key).join(' '));
+  const sixSeven = doubles.stretch.find((p) => p.fact.key === '6+7');
+  check(!!sixSeven && sixSeven.solved.join('') === '6 + 7 = 6 + 6 + 1 = 13', `${tag}: 6 + 7 is shown as 6 + 6 + 1`, sixSeven && sixSeven.solved.join(''));
+
+  // ---- which potions are addition facts
+  const { facts, rounds } = data;
+  check(facts.within && facts.within.key === '12+8' && facts.within.hint === 'count' && facts.over === null && facts.big === null, `${tag}: a sum is a fact when it stays within 20`, JSON.stringify([facts.within, facts.over, facts.big]));
+  check(facts.sub === null && facts.story === null, `${tag}: taking away and stories are not tracked as addition facts`);
+  check(facts.easy.every((p) => p.fact && p.fact.key === `${p.fact.a}+${p.fact.b}` && p.fact.a + p.fact.b === Number(p.answer)), `${tag}: every easy sum is an addition fact with its own name`);
+  check(rounds.review.every((round) => round.includes('add:8+5') && round.length === 8 && new Set(round).size === 8), `${tag}: a fact that is due takes the place of a fresh sum in a mixed round`, rounds.review[0].join(' '));
+  check(rounds.reviewEasy.every((round) => ['add:8+5', 'add:9+4', 'add:7+6'].every((key) => round.includes(key)) && new Set(round).size === 8), `${tag}: several due facts fit into a round of sums`);
+  check(rounds.noAdd.every((round) => !round.includes('add:8+5') && round.every((key) => /^(sub|time):/.test(key))), `${tag}: with Adding switched off, no addition fact is slipped in`, rounds.noAdd[0].join(' '));
+  check(rounds.plain.every((round) => round.length === 8 && new Set(round).size === 8), `${tag}: without anything to review a round is as before`);
+  check(problems.length === 0, `${tag}: no errors in the browser console`, problems.slice(0, 3).join(' | '));
+  await context.close();
+}
+
+// ---------------------------------------------------------------- math scenario: ten-frames and the counting-on hint
+
+// One addition fact of every kind, and for each the dots and the hint.
+const HELP_ROUND = [['add', 3, 8], ['add', 12, 5], ['add', 9, 1], ['add', 10, 10], ['bridge', 8, 5], ['double', 6], ['nearDouble', 6, 7], ['nearDouble', 10, 9], ['makeTen', 7], ['makeTen', 1]];
+// The ones that are hardest to fit: ten hops, nine hops, and the two rows of little sums.
+const HELP_ROUND_SHORT = [['add', 10, 10], ['bridge', 8, 5], ['nearDouble', 10, 9], ['makeTen', 1]];
+const HELP_SHOTS = { '3 + 8': 'count-on', '8 + 5': 'make-10-first', '6 + 7': 'near-double', '7 + ?': 'make-10', '6 + 6': 'double' };
+
+async function factHelpers(browser, baseUrl) {
+  // ---- every kind of fact on the biggest and the smallest screen, the trickiest
+  // ones at every iPad size (still pictures, so it is quick)
+  for (const size of [...SIZES, ...TIGHT_SIZES]) {
+    const tag = `fact help ${size.name}`;
+    const recipes = size === SIZES[0] || size === TIGHT_SIZES[3] ? HELP_ROUND : HELP_ROUND_SHORT;
+    const { context, page, problems } = await openPage(browser, baseUrl, size, { reducedMotion: 'reduce' });
+    await useRound(page, recipes);
+    await startPotions(page);
+    for (let turn = 1; turn <= recipes.length; turn++) {
+      const seen = await readBrew(page);
+      const sum = seen.equation.join(' ');
+      const what = `${tag}, ${sum.replace(' = ?', '')}`;
+      const want = expectHelp(seen);
+      const answer = solveBrew(seen).digits;
+      let help = await readHelp(page);
+      check(help.buttons.join() === 'dots,hint' && help.pressed.length === 0 && !help.open, `${what}: Dots and Hint are offered, and nothing is showing yet`, JSON.stringify(help.buttons));
+      await checkPlayLayout(page, `${what} (help closed)`, '#screen-brew', BREW_ROWS);
+      await checkBrewPicture(page, `${what} (help closed)`);
+      const before = await rowsBelow(page);
+      const spokenBefore = (await spokenList(page)).length;
+
+      // ---- the dots: ten-frames, one color for each number
+      await tap(page, '#btn-dots');
+      help = await readHelp(page);
+      check(help.open && help.view === 'dots' && help.pressed.join() === 'dots', `${what}: tapping Dots shows the ten-frames`, `${help.view} / ${help.pressed.join()}`);
+      check(help.frames.join(' ') === want.frames.join(' '), `${what}: the dots show each number in its own color`, `${help.frames.join(' ')} — wanted ${want.frames.join(' ')}`);
+      check(help.frames.every((frame) => frame.length === 10), `${what}: every frame has ten places`);
+      check(/dot/.test(help.framesLabel), `${what}: the ten-frames are described for a screen reader`, help.framesLabel);
+      check((await rowsBelow(page)) === before, `${what}: opening the dots moves nothing below the card`, `${before} -> ${await rowsBelow(page)}`);
+      check((await spokenList(page)).length === spokenBefore, `${what}: the dots open quietly`);
+      await checkHelperFits(page, `${what} (dots)`);
+      await checkPlayLayout(page, `${what} (dots)`, '#screen-brew', BREW_ROWS);
+      await checkBrewPicture(page, `${what} (dots)`);
+      const shotName = Object.keys(HELP_SHOTS).find((start) => sum.startsWith(start));
+      if (shotName) await shot(page, `22-facts-dots-${HELP_SHOTS[shotName]}-${size.name}`);
+
+      // ---- the hint: a strategy, with the last step left for the child
+      await tap(page, '#btn-hint');
+      help = await readHelp(page);
+      check(help.open && help.view === 'hint' && help.pressed.join() === 'hint' && help.frames.length === 0, `${what}: tapping Hint swaps the dots for the hint`, `${help.view} / ${help.pressed.join()}`);
+      check(help.start === want.start && help.hops.join() === want.hops.join(), `${what}: the hint starts at the right number and hops dot by dot`, `start ${help.start}, hops ${help.hops.join()} — wanted ${want.start}, ${want.hops.join()}`);
+      check(help.steps.join(' | ') === want.steps.join(' | '), `${what}: the hint shows the right little sums`, help.steps.join(' | '));
+      check(want.caption.test(help.caption), `${what}: the hint says what to do`, help.caption);
+      if (seen.equation[2] !== '?') {
+        check(!help.hops.includes(answer) && !help.steps.some((step) => step.endsWith(`= ${answer}`)) && !help.caption.includes(answer), `${what}: the hint leaves the answer to the child`, `${help.hops.join()} ${help.steps.join()}`);
+      }
+      const said = (await spokenList(page)).pop();
+      check(want.say.test(said.text) && Math.abs(said.rate - 0.85) < 0.01, `${what}: the hint is read aloud`, said.text);
+      check(help.seenHops === help.hops.length, `${what}: with reduced motion every hop is there at once`, `${help.seenHops} of ${help.hops.length}`);
+      check((await page.evaluate(() => document.getAnimations().filter((a) => a.playState === 'running').length)) === 0, `${what}: with reduced motion nothing in the hint moves`);
+      check((await rowsBelow(page)) === before, `${what}: opening the hint moves nothing below the card`, `${before} -> ${await rowsBelow(page)}`);
+      await checkHelperFits(page, `${what} (hint)`);
+      await checkPlayLayout(page, `${what} (hint)`, '#screen-brew', BREW_ROWS);
+      await checkBrewPicture(page, `${what} (hint)`);
+      if (shotName) await shot(page, `22-facts-hint-${HELP_SHOTS[shotName]}-${size.name}`);
+
+      // ---- tapping it again puts it away
+      await tap(page, '#btn-hint');
+      help = await readHelp(page);
+      check(!help.open && help.pressed.length === 0, `${what}: tapping Hint again puts it away`);
+      check((await rowsBelow(page)) === before, `${what}: closing the help moves nothing either`);
+
+      await tapDigits(page, answer);
+      const kind = await brewAndSeeResult(page);
+      check(kind === 'brewed', `${what}: the potion brews with ${answer}`, kind);
+      await tapNext(page);
+    }
+    await page.waitForSelector('#screen-done:not([hidden])');
+    const facts = (await readFacts(page)).facts;
+    check(Object.keys(facts).length === recipes.length && Object.values(facts).every((f) => f.pace === 'helped' && f.box === 1 && f.seen === 1 && f.right === 1 && f.times.length === 0),
+      `${tag}: answers given with the dots or the hint open are remembered as helped, not as quick`, JSON.stringify(Object.values(facts).map((f) => f.pace)));
+    check(problems.length === 0, `${tag}: no errors in the browser console`, problems.slice(0, 3).join(' | '));
+    await context.close();
+  }
+
+  // ---- with motion: the hint hops on dot by dot, and a missed fact comes back with its dots
+  const tag = 'fact help in play';
+  const { context, page, problems } = await openPage(browser, baseUrl, SIZES[1]);
+  await useRound(page, [['add', 3, 8], ['sub', 15, 7], ['add', 34, 20], ['add', 9, 4], ['blocks', 17], ['makeTen', 6]]);
+  await startPotions(page);
+  let seen = await readBrew(page);
+  check(seen.equation.join(' ') === '3 + 8 = ?', `${tag}: the round starts with 3 + 8`, seen.equation.join(' '));
+  await tap(page, '#btn-hint');
+  await sleep(150);
+  let help = await readHelp(page);
+  check(help.hops.join() === '9,10,?' && help.start === '8', `${tag}: for 3 + 8 the hint starts from 8, the bigger number`, `${help.start}: ${help.hops.join()}`);
+  check(help.seenHops < 3, `${tag}: the hops come one after the other, not all at once`, `${help.seenHops} of 3 showing after a moment`);
+  await sleep(2200);
+  help = await readHelp(page);
+  check(help.seenHops === 3, `${tag}: in the end every hop is showing`, String(help.seenHops));
+  await checkHelperFits(page, `${tag} (hint, after the hops)`);
+  await tap(page, '#btn-dots');
+  await sleep(700);
+  help = await readHelp(page);
+  check(help.view === 'dots' && help.frames.join(' ') === 'aaabbbbbbb b.........', `${tag}: 3 + 8 fills the first frame and puts 1 in the second`, help.frames.join(' '));
+  await shot(page, '22-facts-dots-count-on-landscape-in-play');
+
+  // Missed on purpose. The fizzle card is as gentle as ever.
+  await tapDigits(page, '12');
+  let kind = await brewAndSeeResult(page);
+  check(kind === 'fizzle', `${tag}: a wrong answer gently fizzles`, kind);
+  check((await page.locator('#result-word').getAttribute('aria-label')) === '3 + 8 = 11', `${tag}: the fizzle card shows the finished sum`);
+  let facts = (await readFacts(page)).facts;
+  check(facts['3+8'] && facts['3+8'].miss === true && facts['3+8'].box === 0 && facts['3+8'].right === 0, `${tag}: the miss is written into the fact memory`, JSON.stringify(facts['3+8']));
+  await tapNext(page);
+
+  // Potions that are not addition facts have no help row.
+  for (const [sum, why] of [['15 − 7 = ?', 'taking away'], ['34 + 20 = ?', 'a sum past 20']]) {
+    seen = await readBrew(page);
+    help = await readHelp(page);
+    check(seen.equation.join(' ') === sum && help.buttons.length === 0 && !help.open, `${tag}: ${why} has no Dots or Hint button`, `${seen.equation.join(' ')}: ${help.buttons.join()}`);
+    await checkBrewPicture(page, `${tag} (${why})`);
+    check((await brewOne(page)).kind === 'brewed', `${tag}: ${why} still brews`);
+    await tapNext(page);
+  }
+  seen = await readBrew(page);
+  help = await readHelp(page);
+  check(seen.equation.join(' ') === '9 + 4 = ?' && help.buttons.join() === 'dots,hint' && !help.open, `${tag}: a fact that was never missed starts with its help closed`, JSON.stringify(help.buttons));
+  check((await brewOne(page)).kind === 'brewed', `${tag}: 9 + 4 brews without help`);
+  await tapNext(page);
+
+  // Three other potions later the missed fact is back, with its dots already showing.
+  seen = await readBrew(page);
+  help = await readHelp(page);
+  check(seen.equation.join(' ') === '3 + 8 = ?', `${tag}: the missed fact comes back a few turns later`, seen.equation.join(' '));
+  check(help.open && help.view === 'dots' && help.pressed.join() === 'dots' && help.frames.join(' ') === 'aaabbbbbbb b.........', `${tag}: after a miss the dots show by themselves`, `${help.view} ${help.frames.join(' ')}`);
+  await sleep(800); // the dots pop in one after the other
+  await checkHelperFits(page, `${tag} (dots after a miss)`);
+  await shot(page, '22-facts-dots-after-a-miss-landscape');
+  const back = await brewOne(page);
+  check(back.kind === 'brewed' && (await page.locator('#result-stars .big-star.is-won').count()) === 1, `${tag}: the fact brews on the second try, for 1 star`, back.kind);
+  await tapNext(page);
+  seen = await readBrew(page);
+  help = await readHelp(page);
+  check(seen.show === 'blocks' && help.buttons.length === 0, `${tag}: tens and ones have no help row`, seen.show);
+  check((await brewOne(page)).kind === 'brewed', `${tag}: tens and ones still brew`);
+  await tapNext(page);
+  check((await brewOne(page)).kind === 'brewed', `${tag}: the make-10 potion brews`);
+  await tapNext(page);
+  await page.waitForSelector('#screen-done:not([hidden])');
+  facts = (await readFacts(page)).facts;
+  check(Object.keys(facts).sort().join() === '3+8,6+?=10,9+4', `${tag}: only addition facts are written into the fact memory`, Object.keys(facts).join());
+  check(facts['3+8'].seen === 2 && facts['3+8'].right === 1 && facts['3+8'].miss === false && facts['3+8'].pace === 'helped' && facts['3+8'].box === 1,
+    `${tag}: the second try counts as right with help`, JSON.stringify(facts['3+8']));
+  check(facts['9+4'].pace === 'quick' && facts['9+4'].box === 1 && facts['9+4'].times.length === 1 && facts['9+4'].times[0] < 6000, `${tag}: a quick answer without help is timed`, JSON.stringify(facts['9+4']));
+  const saved = await readSaved(page);
+  check(JSON.stringify(Object.keys(saved)) === JSON.stringify(MAIN_SAVE_KEYS) && !('facts' in saved.math), `${tag}: the game save keeps its old shape (facts live under their own key)`, Object.keys(saved).join());
+  check(problems.length === 0, `${tag}: no errors in the browser console`, problems.slice(0, 3).join(' | '));
+  await context.close();
+
+  // ---- a fact that was missed on another day also comes back with its dots, in a mixed round of sums
+  const later = await openPage(browser, baseUrl, SIZES[0], {
+    reducedMotion: 'reduce',
+    saved: { math: { level: 'easy', topics: Object.fromEntries(ALL_TOPICS.map((id) => [id, id === 'add'])), brewed: 3 } },
+    savedFacts: { facts: { '8+5': savedFact(0, { due: true, miss: true, seen: 2, right: 1 }), '7+6': savedFact(1, { due: true, pace: 'slow', times: [9000] }), '9+9': savedFact(4, { due: true }), '3+?=10': savedFact(0, { due: true, miss: true }) }, speed: {} },
+  });
+  await startPotions(later.page);
+  const round = [];
+  let dotsShown = '';
+  for (let turn = 1; turn <= 8; turn++) {
+    seen = await readBrew(later.page);
+    round.push(seen.equation.join(' '));
+    if (seen.equation.join(' ') === '8 + 5 = ?') dotsShown = (await readHelp(later.page)).view;
+    await brewOne(later.page);
+    await tapNext(later.page);
+  }
+  check(round.includes('8 + 5 = ?') && round.includes('7 + 6 = ?'), 'spaced repeats: slow and missed facts from another day come back in the next round of sums', round.join(' | '));
+  check(round[0] === '8 + 5 = ?' && round[1] === '7 + 6 = ?', 'spaced repeats: the missed fact comes first, then the slow one', round.slice(0, 2).join(' | '));
+  check(round[2] === '9 + 9 = ?', 'spaced repeats: a quick fact whose day has come is asked again too, after the ones that need work', round[2]);
+  check(!round.some((sum) => sum.includes('? = 10')), 'spaced repeats: a make-10 pair waits for its own drill', round.join(' | '));
+  check(dotsShown === 'dots', 'spaced repeats: a fact missed on another day opens with its dots', dotsShown);
+  check(new Set(round).size === 8 && round.every((sum) => /^\d+ \+ \d+ = \?$/.test(sum)), 'spaced repeats: the rest of the round is fresh sums', round.join(' | '));
+  check(later.problems.length === 0, 'spaced repeats: no errors in the browser console', later.problems.slice(0, 3).join(' | '));
+  await later.context.close();
+}
+
+// ---------------------------------------------------------------- math scenario: the Potions menu and its drills
+
+// The Potions menu: three big cards, everything on screen, nothing overlapping.
+async function checkMenu(page, label, speedy = []) {
+  const menu = await page.evaluate(() => {
+    const cards = [...document.querySelectorAll('#screen-potions .menu-card')].filter((node) => node.offsetParent !== null).map((node) => {
+      const box = node.getBoundingClientRect();
+      return { id: node.id, text: node.innerText.replace(/\s+/g, ' ').trim(), left: box.left, top: box.top, right: box.right, bottom: box.bottom, width: box.width, height: box.height };
+    });
+    const witch = document.querySelector('#screen-potions .witch').getBoundingClientRect();
+    const home = document.querySelector('#screen-potions [data-go="home"]').getBoundingClientRect();
+    const overlap = (a, b) => a.left < b.right - 1 && a.right > b.left + 1 && a.top < b.bottom - 1 && a.bottom > b.top + 1;
+    return {
+      cards,
+      onScreen: cards.concat([witch, home]).every((b) => b.left >= 0 && b.top >= 0 && b.right <= window.innerWidth && b.bottom <= window.innerHeight),
+      apart: cards.every((a, i) => cards.every((b, j) => i === j || !overlap(a, b))) && cards.every((card) => !overlap(card, witch) && !overlap(card, home)),
+      inputs: [...document.querySelectorAll('input, textarea')].filter((node) => node.offsetParent !== null).length,
+      sideways: document.documentElement.scrollWidth > window.innerWidth + 1,
+    };
+  });
+  const want = ['btn-mix', 'btn-drill-make10', ...(speedy.includes('make10') ? ['btn-speedy-make10'] : []), 'btn-drill-doubles', ...(speedy.includes('doubles') ? ['btn-speedy-doubles'] : [])];
+  check(menu.cards.map((card) => card.id).join() === want.join(), `${label}: the menu offers ${want.length} potions to choose from`, menu.cards.map((card) => card.id).join());
+  check(menu.cards.every((card) => card.height >= MIN_TAP && card.width >= 200), `${label}: every menu card is big enough for small fingers`,
+    menu.cards.map((card) => `${Math.round(card.width)}x${Math.round(card.height)}`).join(', '));
+  check(menu.onScreen && menu.apart && !menu.sideways, `${label}: the menu fits on the iPad and nothing overlaps`, `on screen ${menu.onScreen}, apart ${menu.apart}`);
+  check(menu.inputs === 0, `${label}: the menu has no text field`);
+  return menu.cards;
+}
+
+async function factDrills(browser, baseUrl) {
+  for (const size of SIZES) {
+    const tag = `drills ${size.name}`;
+    const { context, page, problems } = await openPage(browser, baseUrl, size, { reducedMotion: size === SIZES[0] ? 'no-preference' : 'reduce', saved: { stars: 2 } });
+
+    // ---- the menu
+    await tap(page, '#btn-potions');
+    await page.waitForSelector('#screen-potions:not([hidden])');
+    check(!(await isShowing(page, '#screen-brew')), `${tag}: the Potions button opens the potion menu first`);
+    let spoken = await spokenList(page);
+    check(spoken.length === 1 && /potion/i.test(spoken[0].text), `${tag}: the menu greets with the voice (the tap unlocks speech)`, spoken.map((s) => s.text).join(' | '));
+    await sleep(500);
+    let cards = await checkMenu(page, tag);
+    check(/Mixed potions/.test(cards[0].text) && /Make 10/.test(cards[1].text) && /Doubles/.test(cards[2].text), `${tag}: Mixed potions, Make 10 and Doubles can be chosen`, cards.map((card) => card.text).join(' | '));
+    check(!(await isShowing(page, '#btn-speedy-make10')) && !(await isShowing(page, '#btn-speedy-doubles')), `${tag}: no speedy brew is offered before the facts are quick`);
+    await shot(page, `23-potions-menu-${size.name}`);
+    await tap(page, '#screen-potions [data-go="home"]');
+    await page.waitForSelector('#screen-home:not([hidden])');
+    check(true, `${tag}: the home button leaves the menu`);
+
+    // ---- both drills, one round each
+    let stars = 2;
+    let brewed = 0;
+    for (const drill of DRILLS) {
+      const name = drill === 'make10' ? 'Make 10' : 'Doubles';
+      await startPotions(page, `#btn-drill-${drill}`);
+      check((await page.locator('#brew-progress .rp-star').count()) === 8, `${tag}: a ${name} round has 8 potions`);
+      spoken = await spokenList(page);
+      check(/\?/.test(spoken[spoken.length - 1].text) && spoken[spoken.length - 1].text.length > 12, `${tag}: the first ${name} potion is read aloud`, spoken[spoken.length - 1].text);
+      const sums = [];
+      const kinds = [];
+      for (let turn = 1; turn <= 8; turn++) {
+        const seen = await readBrew(page);
+        const help = await readHelp(page);
+        const sum = seen.equation.join(' ');
+        const [a, , b] = seen.equation.map((part) => parseInt(part, 10));
+        sums.push(sum);
+        const kindOf = seen.equation[2] === '?' ? 'pair' : a === b ? 'double' : Math.abs(a - b) === 1 && drill === 'doubles' ? 'near' : 'bridge';
+        kinds.push(kindOf);
+        check(seen.topic === drill && help.mode === 'drill', `${tag}: ${name} turn ${turn} belongs to the drill`, `${seen.topic} ${help.mode}`);
+        check(help.buttons.join() === 'dots,hint', `${tag}: ${name} turn ${turn} offers Dots and Hint`);
+        check(solveBrew(seen).numbers.every((n) => n >= 0 && n <= 20), `${tag}: ${name} turn ${turn} stays within 20`, sum);
+        check(seen.focus !== 'INPUT' && seen.focus !== 'TEXTAREA', `${tag}: no text field is focused in a drill`, seen.focus);
+        if (kindOf === 'pair') check(seen.title === 'Make 10' && seen.equation[4] === '10', `${tag}: "${sum}" asks what makes 10`, seen.title);
+        if (kindOf === 'bridge') check(seen.title === 'Make 10 first' && a < 10 && a > b && a + b > 10, `${tag}: "${sum}" bridges through 10, bigger number first`, seen.title);
+        if (kindOf === 'double') check(seen.title === 'Doubles', `${tag}: "${sum}" is a double`, seen.title);
+        if (kindOf === 'near') check(seen.title === 'Double and 1 more', `${tag}: "${sum}" is a near double`, seen.title);
+        if (turn === 1 || turn === 8) {
+          await checkPlayLayout(page, `${tag} ${name} turn ${turn}`, '#screen-brew', BREW_ROWS);
+          await checkBrewPicture(page, `${tag} ${name} turn ${turn}`);
+          await tapDigits(page, solveBrew(seen).digits);
+          await sleep(350);
+          await shot(page, `24-drill-${drill}-${turn === 1 ? 'first' : 'last'}-${size.name}`);
+          for (let i = 0; i < solveBrew(seen).digits.length; i++) await tap(page, '#btn-brew-undo');
+          // Looking at a potion for a screenshot must not make its fact look slow or helped: brew it without help.
+        }
+        const result = await brewOne(page);
+        check(result.kind === 'brewed' && result.want.solved.test(result.shown), `${tag}: "${sum}" brews, and the card shows the finished sum`, `${result.kind}: ${result.shown}`);
+        if (kindOf === 'bridge') {
+          const first = 10 - a;
+          check(result.shown === `${a} + ${b} = ${a} + ${first} + ${b - first} = ${a + b}`, `${tag}: the card shows how ${a} + ${b} goes through 10`, result.shown);
+        }
+        if (kindOf === 'near') {
+          const small = Math.min(a, b);
+          check(result.shown === `${a} + ${b} = ${small} + ${small} + 1 = ${a + b}`, `${tag}: the card shows ${a} + ${b} as a double and 1 more`, result.shown);
+        }
+        if (turn === 8) {
+          await sleep(size === SIZES[0] ? 1100 : 300);
+          check(await resultCardFits(page), `${tag}: the ${name} result card fits on screen`);
+          await shot(page, `24-drill-${drill}-result-${size.name}`);
+        }
+        stars += 2;
+        brewed += 1;
+        await tapNext(page);
+      }
+      const core = drill === 'make10' ? 'pair' : 'double';
+      check(kinds.slice(0, 6).every((k) => k === core) && kinds.slice(6).every((k) => k !== core), `${tag}: ${name} asks six core facts first, then two that build on them`, kinds.join());
+      check(new Set(sums).size === 8, `${tag}: no ${name} potion comes twice in a round`, sums.join(' | '));
+      await page.waitForSelector('#screen-done:not([hidden])');
+      await sleep(600);
+      check(await donePanelFits(page), `${tag}: the round-complete card fits after ${name}`);
+      check(!(await isShowing(page, '#speedy-offer')) && !(await isShowing(page, '#done-best')), `${tag}: no speedy brew is offered after a first ${name} round`);
+      check((await page.locator('#done-summary').innerText()).includes('8 potions and earned 16 stars'), `${tag}: the ${name} round earns stars like any other`);
+      let facts = (await readFacts(page)).facts;
+      check(sums.every((sum) => {
+        const key = sum.replace(/ /g, '').replace('=?', '');
+        return facts[key] && facts[key].box === 1 && facts[key].pace === 'quick' && facts[key].times.length === 1;
+      }), `${tag}: every ${name} answer is in the fact memory, timed and quick`, Object.keys(facts).join());
+
+      // ---- Play again stays in the same drill, and its six core facts include the ones not asked yet
+      await tap(page, '#btn-again');
+      await page.waitForSelector('#screen-brew:not([hidden])');
+      const again = [];
+      for (let turn = 1; turn <= (drill === 'make10' ? 6 : 1); turn++) {
+        const seen = await readBrew(page);
+        again.push(seen.equation.join(' '));
+        check(seen.topic === drill, `${tag}: Play again starts another ${name} round`, seen.topic);
+        if (turn < 6) {
+          await brewOne(page);
+          await tapNext(page);
+          stars += 2;
+          brewed += 1;
+        }
+      }
+      if (drill === 'make10') {
+        const fresh = again.filter((sum) => !sums.includes(sum));
+        check(fresh.length === 3 && again.every((sum) => sum.endsWith('? = 10')), `${tag}: the next ${name} round asks the three pairs that were not asked yet`, again.join(' | '));
+      }
+      await tap(page, '#btn-brew-quit');
+      await page.waitForSelector('#screen-home:not([hidden])');
+      await tap(page, '#btn-potions');
+      await page.waitForSelector('#screen-potions:not([hidden])');
+      const sub = await page.locator(`#btn-drill-${drill} .menu-sub`).innerText();
+      check(sub === 'Warming up…', `${tag}: the ${name} card says the drill has been started (nothing is quick yet)`, sub);
+      await tap(page, '#screen-potions [data-go="home"]');
+      await page.waitForSelector('#screen-home:not([hidden])');
+      facts = (await readFacts(page)).facts;
+      check(Object.values(facts).every((f) => f.box <= 2 && !f.miss), `${tag}: nothing is quick after one or two answers`);
+    }
+
+    // ---- stars are the shared ones, and the save has its old shape
+    const saved = await readSaved(page);
+    check(saved.stars === stars && saved.math.brewed === brewed, `${tag}: drill potions earn the shared stars`, `${saved.stars} stars (wanted ${stars}), ${saved.math.brewed} potions (wanted ${brewed})`);
+    check(JSON.stringify(Object.keys(saved)) === JSON.stringify(MAIN_SAVE_KEYS) && JSON.stringify(Object.keys(saved.math)) === '["level","topics","brewed"]',
+      `${tag}: the game save keeps its old shape`, `${Object.keys(saved).join()} / ${Object.keys(saved.math).join()}`);
+    check((await page.locator('#screen-home [data-stars]').innerText()).trim() === String(stars), `${tag}: home shows the stars`);
+    check(problems.length === 0, `${tag}: no errors in the browser console`, problems.slice(0, 3).join(' | '));
+    await context.close();
+  }
+}
+
+// ---------------------------------------------------------------- math scenario: the optional speedy brew
+
+const openGrownUps = async (page, browserName) => {
+  await hold(page, browserName, '#btn-parent', 2300);
+  await page.waitForSelector('#screen-parent:not([hidden])', { timeout: 3000 });
+};
+
+async function speedyBrews(browser, browserName, baseUrl) {
+  const tag = 'speedy brew';
+  // Eight of the nine make-10 pairs are quick already. The ninth is one quick answer away.
+  const pairs = Object.fromEntries([2, 3, 4, 5, 6, 7, 8, 9].map((n) => [`${n}+?=10`, savedFact(3)]));
+  pairs['1+?=10'] = savedFact(2, { due: true, seen: 2, right: 2, times: [3000, 3000] });
+  const { context, page, problems } = await openPage(browser, baseUrl, SIZES[0], {
+    reducedMotion: 'reduce', clock: true, saved: { stars: 5 }, savedFacts: { facts: pairs, speed: {} },
+  });
+  const speedyOf = async () => (await readFacts(page)).speed.make10;
+  const starsShown = async (screen) => (await page.locator(`${screen} [data-stars]`).innerText()).trim();
+
+  // ---- not offered yet: one fact is not quick
+  await tap(page, '#btn-potions');
+  await page.waitForSelector('#screen-potions:not([hidden])');
+  await checkMenu(page, `${tag}, before it is earned`);
+  check((await page.locator('#btn-drill-make10 .menu-sub').innerText()) === '8 of 9 quick', `${tag}: the Make 10 card says 8 of 9 facts are quick`);
+  check(!(await isShowing(page, '#btn-speedy-make10')), `${tag}: it is not offered while one fact is not quick yet`);
+
+  // ---- the drill round that makes the last fact quick
+  await tap(page, '#btn-drill-make10');
+  await page.waitForSelector('#screen-brew:not([hidden])');
+  const sums = [];
+  for (let turn = 1; turn <= 8; turn++) {
+    const result = await brewOne(page);
+    sums.push(result.seen.equation.join(' '));
+    check(result.kind === 'brewed', `${tag}: drill turn ${turn} brews`, result.kind);
+    await tapNext(page);
+  }
+  check(sums.slice(0, 4).every((sum) => sum.endsWith('? = 10')) && sums.slice(4).every((sum) => sum.endsWith('= ?')),
+    `${tag}: with the pairs nearly all quick, the drill gives half its round to bridging through 10`, sums.join(' | '));
+  check(sums.includes('1 + ? = 10'), `${tag}: the one pair that still needs practice is asked`, sums.join(' | '));
+  await page.waitForSelector('#screen-done:not([hidden])');
+  await sleep(400);
+  check(await isShowing(page, '#speedy-offer'), `${tag}: once every pair is quick, a speedy brew is offered after the round`);
+  const offer = await page.locator('#speedy-offer-text').innerText();
+  check(/New!/.test(offer) && /speedy brew/i.test(offer) && /just for fun/i.test(offer) && /No rush/i.test(offer), `${tag}: the offer is gentle and says it is just for fun`, offer);
+  const offerButtons = await page.evaluate(() => ['#btn-offer-go', '#btn-offer-skip', '#btn-again', '#btn-done-home'].map((sel) => {
+    const box = document.querySelector(sel).getBoundingClientRect();
+    return box.height >= 60 && box.width >= 60 && box.top >= 0 && box.bottom <= window.innerHeight;
+  }));
+  check(offerButtons.every(Boolean), `${tag}: "Try it", "Not now", "Play again" and "Home" are all big and on screen`, offerButtons.join());
+  check(await donePanelFits(page), `${tag}: the round-complete card still fits with the offer`);
+  check((await speedyOf()).unlocked === true && (await speedyOf()).plays === 0, `${tag}: earning it is remembered`, JSON.stringify(await speedyOf()));
+  await shot(page, '26-speedy-offer-portrait');
+
+  // ---- it can always be skipped
+  await tap(page, '#btn-offer-skip');
+  check(!(await isShowing(page, '#speedy-offer')) && await isShowing(page, '#btn-again') && await isShowing(page, '#btn-done-home'),
+    `${tag}: "Not now" puts the offer away and leaves the other buttons`);
+  check((await readSaved(page)).stars === 21, `${tag}: skipping costs nothing`, String((await readSaved(page)).stars));
+  await tap(page, '#btn-done-home');
+  await tap(page, '#btn-potions');
+  await page.waitForSelector('#screen-potions:not([hidden])');
+  await sleep(300);
+  const cards = await checkMenu(page, `${tag}, once it is earned`, ['make10']);
+  check(/Speedy brew/.test(cards[2].text) && /Just for fun!/.test(cards[2].text), `${tag}: the menu now has a speedy brew under Make 10`, cards[2].text);
+  check((await page.locator('#btn-drill-make10 .menu-sub').innerText()) === 'All quick! ⭐', `${tag}: the Make 10 card says all its facts are quick`);
+  await shot(page, '26-speedy-menu-portrait');
+
+  // ---- the speedy brew: no countdown, no result cards, nothing to lose
+  let spokenBefore = (await spokenList(page)).length;
+  await tap(page, '#btn-speedy-make10');
+  await page.waitForSelector('#screen-brew:not([hidden])');
+  let help = await readHelp(page);
+  check(help.mode === 'speedy' && help.buttons.length === 0 && !help.open, `${tag}: there are no Dots or Hint buttons in a speedy brew`, `${help.mode} ${help.buttons.join()}`);
+  check(/No rush/.test(help.note) && /just for fun/.test(help.note), `${tag}: a kind note says there is no rush`, help.note);
+  let spoken = (await spokenList(page)).slice(spokenBefore);
+  check(spoken.length === 1 && /Speedy brew/.test(spoken[0].text) && /No rush/.test(spoken[0].text), `${tag}: the round is greeted, and the potions are not read out one by one`, spoken.map((s) => s.text).join(' | '));
+  const clockFree = await page.evaluate(() => {
+    const screen = document.querySelector('#screen-brew');
+    const ticking = [...screen.querySelectorAll('progress, meter, [class*="timer"], [class*="countdown"], [class*="clock"], [class*="time"]')].filter((node) => node.offsetParent !== null);
+    return { ticking: ticking.length, text: screen.innerText.replace(/\s+/g, ' ') };
+  });
+  check(clockFree.ticking === 0 && !/\d\s*(s|sec|seconds?)\b|\d:\d\d|hurry|quick!|faster/i.test(clockFree.text), `${tag}: there is no timer or countdown on screen`, clockFree.text);
+  check((await page.locator('#brew-icon').innerText()).includes('⚡') && (await page.locator('#brew-progress .rp-star').count()) === 8, `${tag}: it is 8 potions long`);
+  await checkPlayLayout(page, tag, '#screen-brew', BREW_ROWS);
+  await checkBrewPicture(page, tag);
+  await shot(page, '26-speedy-round-portrait');
+
+  // The first potion is missed on purpose: a kind word, and on it goes.
+  const first = await speedyOne(page, 1, { miss: true });
+  const right = first.seen.equation.map((part) => (part === '?' ? first.want.digits : part)).join(' ');
+  check(!first.result, `${tag}: a wrong answer shows no result card`);
+  check(first.help.note === `Almost! ${right}`, `${tag}: a wrong answer gets a kind word and the finished sum`, first.help.note);
+  check(!/[✗✘❌]|wrong|bad|fail|oops/i.test(first.help.note), `${tag}: the kind word never shames`, first.help.note);
+  check((await starsShown('#screen-brew')) === '21', `${tag}: a wrong answer takes no stars away`, await starsShown('#screen-brew'));
+  check((await page.locator('#brew-progress .rp-star.is-tried').count()) === 1 && (await page.locator('#brew-progress .rp-star.is-done').count()) === 0,
+    `${tag}: its star is filled in softly, not in gold`);
+  spoken = await spokenList(page);
+  check(new RegExp(`${first.want.digits}`).test(spoken[spoken.length - 1].text) && !/fizzle|oops/i.test(spoken[spoken.length - 1].text), `${tag}: the right answer is said kindly`, spoken[spoken.length - 1].text);
+  const asked = [first.seen.equation.join(' ')];
+  for (let turn = 2; turn <= 8; turn++) {
+    help = await readHelp(page);
+    check(/No rush/.test(help.note), `${tag}: turn ${turn} starts with the kind note again`, help.note);
+    const one = await speedyOne(page, turn);
+    asked.push(one.seen.equation.join(' '));
+    check(!one.result, `${tag}: turn ${turn} moves on without a result card`);
+  }
+  await page.waitForSelector('#screen-done:not([hidden])');
+  check(new Set(asked).size === 8, `${tag}: the missed potion does not have to be done again`, asked.join(' | '));
+  check(asked.every((sum) => sum.endsWith('? = 10')), `${tag}: it only asks facts that are quick already`, asked.join(' | '));
+  await sleep(400);
+  const done = async () => ({
+    title: await page.locator('#done-title').innerText(),
+    summary: await page.locator('#done-summary').innerText(),
+    best: await page.locator('#done-best').innerText(),
+    stars: await page.locator('#done-words .done-word-stars').allInnerTexts(),
+  });
+  let end = await done();
+  check(end.title === 'Speedy brew done!' && /^You brewed 7 of 8 speedy potions in \d+ seconds?, and earned 3 stars!$/.test(end.summary), `${tag}: the end says how many potions and how long`, `${end.title} ${end.summary}`);
+  check(end.best === '🏆 That is your first record!', `${tag}: the first run is celebrated as a record`, end.best);
+  check(end.stars.filter((text) => text === '⭐').length === 7 && end.stars.length === 8, `${tag}: the list shows which potions were brewed`, end.stars.join('|'));
+  check((await readSaved(page)).stars === 24, `${tag}: joining in earns 3 stars, also with a potion missed`, String((await readSaved(page)).stars));
+  let speedy = await speedyOf();
+  check(speedy.plays === 1 && speedy.best.right === 7 && speedy.best.total === 8 && speedy.best.ms > 0, `${tag}: the run is saved as the personal best`, JSON.stringify(speedy));
+  check(!(await isShowing(page, '#speedy-offer')) && await donePanelFits(page), `${tag}: the end card fits, with no second offer on it`);
+  await shot(page, '26-speedy-done-portrait');
+  const missedKey = first.seen.equation.join('').replace(/ /g, '');
+  check((await readFacts(page)).facts[missedKey].miss === true, `${tag}: the missed fact goes back into practice`, missedKey);
+
+  // ---- a second run with every potion right: a new personal best
+  await tap(page, '#btn-again');
+  await page.waitForSelector('#screen-brew:not([hidden])');
+  check((await readHelp(page)).mode === 'speedy', `${tag}: Play again starts another speedy brew`);
+  for (let turn = 1; turn <= 8; turn++) await speedyOne(page, turn);
+  await page.waitForSelector('#screen-done:not([hidden])');
+  end = await done();
+  check(/^You brewed 8 of 8 speedy potions/.test(end.summary) && end.best === '🏆 New personal best!', `${tag}: beating the record is celebrated`, `${end.summary} ${end.best}`);
+  spoken = await spokenList(page);
+  check(/New personal best/.test(spoken[spoken.length - 1].text), `${tag}: the personal best is cheered out loud`, spoken[spoken.length - 1].text);
+  speedy = await speedyOf();
+  const bestMs = speedy.best.ms;
+  check(speedy.plays === 2 && speedy.best.right === 8, `${tag}: the new best is saved`, JSON.stringify(speedy));
+
+  // ---- a slower run: still stars, still kind, and the best stays
+  await tap(page, '#btn-again');
+  await page.waitForSelector('#screen-brew:not([hidden])');
+  for (let turn = 1; turn <= 8; turn++) await speedyOne(page, turn, { think: 4000 });
+  await page.waitForSelector('#screen-done:not([hidden])');
+  end = await done();
+  const took = Number(/in (\d+) seconds/.exec(end.summary)[1]);
+  check(took >= 32, `${tag}: the time is the thinking time added up`, end.summary);
+  check(/^Your best is 8 of 8 in \d+ seconds?\. Maybe next time!$/.test(end.best), `${tag}: a slower run is told the best, kindly`, end.best);
+  speedy = await speedyOf();
+  check(speedy.plays === 3 && speedy.best.ms === bestMs && (await readSaved(page)).stars === 30, `${tag}: a slower run keeps the best and still earns its 3 stars`, `${JSON.stringify(speedy)}, ${(await readSaved(page)).stars} stars`);
+
+  // ---- leaving in the middle costs nothing
+  await tap(page, '#btn-again');
+  await page.waitForSelector('#screen-brew:not([hidden])');
+  await speedyOne(page, 1);
+  await tap(page, '#btn-brew-quit');
+  await page.waitForSelector('#screen-home:not([hidden])');
+  check((await speedyOf()).plays === 3 && (await readSaved(page)).stars === 30 && (await starsShown('#screen-home')) === '30', `${tag}: leaving in the middle changes neither stars nor record`);
+  await tap(page, '#btn-potions');
+  await page.waitForSelector('#screen-potions:not([hidden])');
+  const bestLine = await page.locator('#btn-speedy-make10 .menu-sub').innerText();
+  check(/^Best: 8 of 8 in \d+ seconds?$/.test(bestLine), `${tag}: the menu shows the personal best`, bestLine);
+  check((await readFacts(page)).facts[missedKey].miss === true && await isShowing(page, '#btn-speedy-make10'), `${tag}: a missed fact never takes the speedy brew away again`);
+  check(!(await isShowing(page, '#btn-speedy-doubles')), `${tag}: Doubles has no speedy brew until its own facts are quick`);
+  await tap(page, '#screen-potions [data-go="home"]');
+  await openGrownUps(page, browserName);
+  const line = await page.locator('#facts-speedy').innerText();
+  check(/Make 10: speedy brew best 8 of 8 in \d+ seconds?/.test(line) && /Doubles: 0 of 10 facts quick/.test(line), `${tag}: the grown-ups see the best and how far Doubles is`, line);
+  check(problems.length === 0, `${tag}: no errors in the browser console`, problems.slice(0, 3).join(' | '));
+  await context.close();
+
+  // ---- the fullest menu (both speedy brews) on every tight screen, and the offer on the two smallest
+  const both = { make10: { unlocked: true, plays: 4, best: { right: 8, total: 8, ms: 123400 } }, doubles: { unlocked: true, plays: 0, best: null } };
+  for (const size of TIGHT_SIZES) {
+    const small = await openPage(browser, baseUrl, size, { reducedMotion: 'reduce', saved: { stars: 5 }, savedFacts: { facts: pairs, speed: both } });
+    await tap(small.page, '#btn-potions');
+    await small.page.waitForSelector('#screen-potions:not([hidden])');
+    await sleep(200);
+    await checkMenu(small.page, `${tag} menu, ${size.name}`, DRILLS);
+    await shot(small.page, `26-speedy-menu-${size.name}`);
+    if (size.name.startsWith('small')) {
+      await tap(small.page, '#btn-drill-make10');
+      await small.page.waitForSelector('#screen-brew:not([hidden])');
+      for (let turn = 1; turn <= 8; turn++) {
+        await brewOne(small.page);
+        await tapNext(small.page);
+      }
+      await small.page.waitForSelector('#screen-done:not([hidden])');
+      await sleep(300);
+      check(await isShowing(small.page, '#speedy-offer') && await donePanelFits(small.page), `${tag} offer, ${size.name}: the offer fits on the round-complete card, with Play again in reach`);
+      const reach = await small.page.evaluate(() => ['#btn-offer-go', '#btn-offer-skip'].every((sel) => {
+        const box = document.querySelector(sel).getBoundingClientRect();
+        return box.top >= 0 && box.bottom <= window.innerHeight && box.height >= 60;
+      }));
+      check(reach, `${tag} offer, ${size.name}: "Try it" and "Not now" are in reach without scrolling`);
+      await shot(small.page, `26-speedy-offer-${size.name}`);
+    }
+    check(small.problems.length === 0, `${tag}, ${size.name}: no errors in the browser console`, small.problems.slice(0, 3).join(' | '));
+    await small.context.close();
+  }
+}
+
+// ---------------------------------------------------------------- math scenario: slow facts for the grown-ups
+
+async function factsForGrownUps(browser, browserName, baseUrl) {
+  let tag = 'slow facts';
+  const words = ['because', 'friend', 'people'];
+  const onlyAdd = Object.fromEntries(ALL_TOPICS.map((id) => [id, id === 'add']));
+  const saved = {
+    words, custom: true, roundSize: 3, progress: { because: { step: 3, mastered: 1, best: 3, last: 1 } },
+    math: { level: 'easy', topics: onlyAdd, brewed: 4 }, stars: 30, robe: 'bubblegum', familiar: 'owl', chimes: true,
+  };
+  const savedFacts = {
+    facts: {
+      '8+5': savedFact(0, { due: true, miss: true, seen: 3, right: 1, times: [7000] }),
+      '6+?=10': savedFact(1, { due: true, pace: 'helped', seen: 2, right: 2, times: [] }),
+      '7+6': savedFact(2, { due: true, pace: 'slow', seen: 4, right: 4, times: [3000, 9400] }),
+      '9+9': savedFact(4, { seen: 6, right: 6 }),
+      '5+5': savedFact(3),
+    },
+    speed: { doubles: { unlocked: true, plays: 2, best: { right: 8, total: 8, ms: 31400 } } },
+  };
+  const { context, page, problems } = await openPage(browser, baseUrl, SIZES[0], { reducedMotion: 'reduce', clock: true, saved, savedFacts });
+  const readPanel = () => page.evaluate(() => ({
+    summary: document.querySelector('#facts-summary').textContent,
+    rows: [...document.querySelectorAll('#slow-facts .fact-row')].map((row) => `${row.querySelector('.fact-name').textContent} — ${row.querySelector('.fact-note').textContent}`),
+    why: [...document.querySelectorAll('#slow-facts .fact-row')].map((row) => `${row.dataset.fact}:${row.dataset.why}`).join(),
+    note: document.querySelector('#slow-facts-note').textContent,
+    speedy: document.querySelector('#facts-speedy').textContent,
+    message: document.querySelector('#facts-message').textContent,
+    reset: document.querySelector('#btn-reset-facts').textContent,
+    fine: document.querySelector('#btn-reset-facts').closest('.panel').innerText.replace(/\s+/g, ' '),
+  }));
+  const showPanel = () => page.locator('#slow-facts').evaluate((node) => node.closest('.panel').scrollIntoView({ block: 'center' }));
+  const goHome = async () => {
+    await tap(page, '#screen-parent .parent-buttons-end [data-go="home"]');
+    await page.waitForSelector('#screen-home:not([hidden])');
+  };
+
+  // ---- the list as saved on another day
+  await openGrownUps(page, browserName);
+  let panel = await readPanel();
+  check(panel.summary === '5 facts practiced · 2 quick · 3 slow or missed.', `${tag}: the grown-up sees how many facts are practiced, quick and slow`, panel.summary);
+  check(panel.why === '8+5:missed,6+?=10:helped,7+6:slow', `${tag}: missed facts are listed first, then helped, then slow; quick ones are not listed`, panel.why);
+  check(panel.rows[0] === '8 + 5 — missed last time · right 1 of 3', `${tag}: a missed fact says so, with how often it was right`, panel.rows[0]);
+  check(panel.rows[1] === '6 + ? = 10 — needed the dots or the hint · right 2 of 2', `${tag}: a make-10 pair is written as a sum with a gap`, panel.rows[1]);
+  check(panel.rows[2] === '7 + 6 — took 9 seconds · right 4 of 4', `${tag}: a slow fact shows the time it took`, panel.rows[2]);
+  check(/come back more often/.test(panel.note), `${tag}: the grown-up is told that these come back more often`, panel.note);
+  check(/Make 10: 0 of 9 facts quick/.test(panel.speedy) && /Doubles: speedy brew best 8 of 8 in 31 seconds/.test(panel.speedy), `${tag}: the speedy brews are summed up`, panel.speedy);
+  check(/6 seconds/.test(panel.fine) && /skipped/.test(panel.fine) && panel.reset === 'Reset math facts', `${tag}: the panel explains "quick" and has a reset button`, panel.reset);
+  await showPanel();
+  const tidy = await page.evaluate(() => {
+    const body = document.querySelector('.parent-body').getBoundingClientRect();
+    const boxes = [...document.querySelectorAll('#slow-facts .fact-row, #btn-reset-facts')].map((node) => node.getBoundingClientRect());
+    const btn = document.querySelector('#btn-reset-facts').getBoundingClientRect();
+    return boxes.every((b) => b.left >= body.left && b.right <= body.right && b.width > 100) && btn.height >= 60 && document.documentElement.scrollWidth <= window.innerWidth + 1;
+  });
+  check(tidy, `${tag}: the list and its reset button fit in the grown-ups' corner`);
+  await sleep(300);
+  await shot(page, '25-grownups-math-facts-portrait');
+  await goHome();
+
+  // ---- playing changes the list: helped, quick again, and a new slow one
+  await useRound(page, [['add', 8, 5], ['add', 7, 6], ['add', 4, 9], ['add', 2, 2]]);
+  await startPotions(page);
+  check((await readHelp(page)).view === 'dots', `${tag}: the fact missed on another day opens with its dots`);
+  await brewOne(page);                 // 8 + 5: right, with the dots showing
+  await tapNext(page);
+  await brewOne(page);                 // 7 + 6: right and quick
+  await tapNext(page);
+  await sleep(60);                     // (the voice is done reading: the stopwatch leaves that time out)
+  await page.evaluate(() => window.__wait(9200));
+  await brewOne(page);                 // 4 + 9: right, but after nine seconds
+  await tapNext(page);
+  await tap(page, '#btn-brew-quit');
+  await page.waitForSelector('#screen-home:not([hidden])');
+  await openGrownUps(page, browserName);
+  panel = await readPanel();
+  check(panel.why === '6+?=10:helped,8+5:helped,4+9:slow' || panel.why === '8+5:helped,6+?=10:helped,4+9:slow', `${tag}: after playing, the list shows what is slow now`, panel.why);
+  check(panel.rows.includes('8 + 5 — needed the dots or the hint · right 2 of 4'), `${tag}: a fact answered with the dots still counts as needing help`, panel.rows.join(' | '));
+  check(panel.rows.some((row) => /^4 \+ 9 — took (9|10) seconds · right 1 of 1$/.test(row)), `${tag}: an answer that took nine seconds is listed as slow`, panel.rows.join(' | '));
+  check(!panel.why.includes('7+6'), `${tag}: a slow fact that is answered quickly leaves the list`);
+  check(panel.summary === '6 facts practiced · 3 quick · 3 slow or missed.', `${tag}: the summary follows`, panel.summary);
+
+  // ---- reset math facts: two taps, and only the facts go
+  const before = await readSaved(page);
+  await showPanel();
+  await tap(page, '#btn-reset-facts');
+  panel = await readPanel();
+  check(/Tap again/.test(panel.reset) && Object.keys((await readFacts(page)).facts).length === 6, `${tag}: one tap on reset only asks to tap again`, panel.reset);
+  await tap(page, '#btn-reset-facts');
+  panel = await readPanel();
+  let facts = await readFacts(page);
+  check(JSON.stringify(facts) === '{"facts":{},"speed":{}}', `${tag}: the second tap empties the fact memory and the speedy bests`, JSON.stringify(facts));
+  check(/No facts practiced yet/.test(panel.summary) && panel.rows.length === 0 && panel.reset === 'Reset math facts', `${tag}: the list is empty after the reset`, panel.summary);
+  check(/reset/i.test(panel.message) && /Stars and words are untouched/.test(panel.message), `${tag}: the grown-up is told what was reset`, panel.message);
+  check(JSON.stringify(await readSaved(page)) === JSON.stringify(before), `${tag}: resetting the facts leaves words, stars and settings exactly as they were`);
+  check(before.stars === 36 && JSON.stringify(before.words) === JSON.stringify(words) && before.progress.because.mastered === 1, `${tag}: the saved words and stars are all still there`, JSON.stringify(before.words));
+  await goHome();
+  await tap(page, '#btn-potions');
+  await page.waitForSelector('#screen-potions:not([hidden])');
+  check(!(await isShowing(page, '#btn-speedy-doubles')) && (await page.locator('#btn-drill-doubles .menu-sub').innerText()) === '6 + 6, then 6 + 7', `${tag}: after the reset the drills are new again`);
+
+  // ---- "Reset stars & progress" clears the facts too, and keeps the word list
+  await tap(page, '#btn-drill-doubles');
+  await page.waitForSelector('#screen-brew:not([hidden])');
+  await brewOne(page);
+  await tapNext(page);
+  await tap(page, '#btn-brew-quit');
+  check(Object.keys((await readFacts(page)).facts).length === 1, `${tag}: a new answer starts the fact memory again`);
+  await openGrownUps(page, browserName);
+  await page.locator('#btn-reset').evaluate((node) => node.scrollIntoView({ block: 'center' }));
+  await tap(page, '#btn-reset');
+  await tap(page, '#btn-reset');
+  facts = await readFacts(page);
+  const after = await readSaved(page);
+  check(JSON.stringify(facts) === '{"facts":{},"speed":{}}' && after.stars === 0, `${tag}: "Reset stars & progress" clears the math facts as well`, JSON.stringify(facts));
+  check(JSON.stringify(after.words) === JSON.stringify(words) && after.custom === true && after.math.level === 'easy' && after.roundSize === 3, `${tag}: ... and keeps the word list and the settings`, JSON.stringify(after.words));
+  check(/math facts/i.test(await page.locator('#btn-reset').evaluate((node) => node.closest('.panel').innerText)), `${tag}: the reset panel says that the math facts go too`);
+  check(problems.length === 0, `${tag}: no errors in the browser console`, problems.slice(0, 3).join(' | '));
+  await context.close();
+
+  // ---- a damaged fact memory never breaks the game
+  tag = 'damaged fact memory';
+  const damaged = ['{"facts":{"8+5":{"seen":3,"box"', '"just a string"', '[1,2,3]',
+    '{"facts":{"8+5":"slow","__proto__":{"seen":1},"constructor":{"seen":2,"box":3}},"speed":7}'];
+  for (const text of damaged) {
+    const odd = await openPage(browser, baseUrl, SIZES[1], { reducedMotion: 'reduce', savedFacts: text, saved: { words, custom: true, stars: 9 } });
+    await openGrownUps(odd.page, browserName);
+    check(/No facts practiced yet/.test(await odd.page.locator('#facts-summary').innerText()), `${tag}: it is read as "no facts yet" (${text.slice(0, 18)}…)`);
+    check(JSON.stringify((await readSaved(odd.page))?.words ?? words) === JSON.stringify(words) && (await odd.page.locator('#word-input').inputValue()) === words.join('\n'), `${tag}: the saved words are still there`);
+    await tap(odd.page, '#screen-parent .parent-buttons-end [data-go="home"]');
+    await startPotions(odd.page, '#btn-drill-make10');
+    check((await brewOne(odd.page)).kind === 'brewed', `${tag}: a drill potion still brews`);
+    const mended = await readFacts(odd.page);
+    check(mended && Object.keys(mended.facts).length === 1 && Object.values(mended.facts)[0].seen === 1, `${tag}: the next answer writes a good fact memory`, JSON.stringify(mended));
+    check((await readSaved(odd.page)).stars === 11 && JSON.stringify((await readSaved(odd.page)).words) === JSON.stringify(words), `${tag}: stars and words are saved as always`);
+    check(odd.problems.length === 0, `${tag}: no errors in the browser console`, odd.problems.slice(0, 3).join(' | '));
+    await odd.context.close();
+  }
+
+  // ---- a device that cannot save: the drills work for this visit
+  tag = 'math facts without storage';
+  for (const storage of ['full', 'blocked']) {
+    const dry = await openPage(browser, baseUrl, SIZES[1], { reducedMotion: 'reduce', storage });
+    await startPotions(dry.page, '#btn-drill-doubles');
+    await tap(dry.page, '#btn-dots');
+    check((await readHelp(dry.page)).view === 'dots', `${tag} (${storage}): the dots still open`);
+    check((await brewOne(dry.page)).kind === 'brewed', `${tag} (${storage}): a drill potion still brews`);
+    await tapNext(dry.page);
+    await tap(dry.page, '#btn-brew-quit');
+    await openGrownUps(dry.page, browserName);
+    check(await isShowing(dry.page, '#save-note'), `${tag} (${storage}): the grown-ups' corner says that saving is not working`);
+    const dryPanel = await dry.page.locator('#slow-facts').evaluate((node) => node.closest('.panel').innerText.replace(/\s+/g, ' '));
+    check(/1 fact practiced/.test(dryPanel) && /needed the dots or the hint/.test(dryPanel), `${tag} (${storage}): the fact is remembered for this visit`, dryPanel.slice(0, 120));
+    await dry.page.locator('#btn-reset-facts').evaluate((node) => node.scrollIntoView({ block: 'center' }));
+    await tap(dry.page, '#btn-reset-facts');
+    await tap(dry.page, '#btn-reset-facts');
+    check(/this visit only/.test(await dry.page.locator('#facts-message').innerText()), `${tag} (${storage}): a reset does not claim to be saved`, await dry.page.locator('#facts-message').innerText());
+    check(dry.problems.length === 0, `${tag} (${storage}): no errors in the browser console`, dry.problems.slice(0, 3).join(' | '));
+    await dry.context.close();
+  }
+}
+
+// ---------------------------------------------------------------- math scenario: a save from before the update
+
+// Exactly what the game wrote before the math update: one key, these fields, in
+// this order. Nothing in it may be lost, renamed or reshaped.
+const OLD_SAVE = '{"words":["because","friend","people","don\'t"],"custom":true,"roundSize":3,' +
+  '"progress":{"because":{"step":3,"mastered":1,"best":3,"last":1760000000000},"friend":{"step":2,"mastered":0,"best":0,"last":0}},' +
+  '"math":{"level":"easy","topics":{"add":false,"sub":true,"place":false,"skip":false,"story":false,"time":false,"coins":false},"brewed":5},' +
+  '"stars":12,"robe":"bubblegum","familiar":"owl","chimes":false}';
+
+async function oldSaveSurvives(browser, browserName, baseUrl) {
+  const tag = 'save from before the math update';
+  const old = JSON.parse(OLD_SAVE);
+  const { context, page, problems } = await openPage(browser, baseUrl, SIZES[1], { reducedMotion: 'reduce', saved: OLD_SAVE });
+  const raw = (key) => page.evaluate((key) => window.localStorage.getItem(key), key);
+  const keysInStorage = () => page.evaluate(() => Object.keys(window.localStorage).sort().join());
+
+  // ---- opening the game changes nothing
+  check((await raw(STORE_KEY)) === OLD_SAVE && (await raw(FACTS_KEY)) === null, `${tag}: opening the game rewrites nothing and adds no key`, await keysInStorage());
+  check((await page.locator('#screen-home [data-stars]').innerText()).trim() === '12', `${tag}: the stars are there`);
+  check(/1 of 4 words mastered/.test(await page.locator('#btn-spells').innerText()) && /5 potions brewed/.test(await page.locator('#btn-potions').innerText()),
+    `${tag}: the home screen shows the saved words and potions`, await page.locator('#btn-spells').innerText());
+  check((await page.locator('#screen-home [data-familiar]').innerText()).includes('🦉'), `${tag}: the chosen familiar is there`);
+  await tap(page, '#btn-book');
+  await page.waitForSelector('#screen-book:not([hidden])');
+  const book = await page.locator('.book-word').evaluateAll((nodes) => nodes.map((node) => `${node.dataset.word}:${node.querySelector('.book-note').textContent}`));
+  check(book.join() === "because:✨ Mastered,friend:Step 2 of 4,people:Step 1 of 4,don't:Step 1 of 4", `${tag}: the spellbook shows every saved word at its saved step`, book.join());
+  await tap(page, '#screen-book [data-go="home"]');
+
+  // ---- spelling still works, with the saved words
+  await tap(page, '#btn-spells');
+  await page.waitForSelector('#screen-play:not([hidden])');
+  check((await page.locator('#round-progress .rp-star').count()) === 3, `${tag}: a spelling round has 3 spells, as saved`);
+  let turn = await readTurn(page, old.words);
+  check(turn.word === 'friend' && turn.step === 2, `${tag}: the first spell is "friend" at its saved step 2`, `${turn.word} at step ${turn.step}`);
+  await tapLetters(page, planTaps(turn, false));
+  check((await castAndSeeResult(page)) === 'success', `${tag}: the spell can be cast`);
+  await tapNext(page);
+  turn = await readTurn(page, old.words);
+  check(old.words.includes(turn.word) && turn.word !== 'friend', `${tag}: the next spell is another saved word`, String(turn.word));
+  await tap(page, '#btn-quit');
+  await page.waitForSelector('#screen-home:not([hidden])');
+  check((await raw(FACTS_KEY)) === null, `${tag}: spelling never touches the fact memory`);
+
+  // ---- the new math screens: a drill, the dots, the hint, and the saved settings in a mixed round
+  await startPotions(page, '#btn-drill-make10');
+  await tap(page, '#btn-dots');
+  await tap(page, '#btn-hint');
+  check((await readHelp(page)).view === 'hint', `${tag}: the hint opens in a drill`);
+  check((await brewOne(page)).kind === 'brewed', `${tag}: a Make 10 potion brews`);
+  await tapNext(page);
+  check((await brewOne(page)).kind === 'brewed', `${tag}: a second Make 10 potion brews`);
+  await tapNext(page);
+  await tap(page, '#btn-brew-quit');
+  await page.waitForSelector('#screen-home:not([hidden])');
+  await startPotions(page);
+  const mixed = await brewOne(page);
+  check(mixed.seen.topic === 'sub' && mixed.want.numbers.every((n) => n <= 20) && mixed.kind === 'brewed', `${tag}: mixed potions still follow the saved level and topics`, mixed.seen.equation.join(' '));
+  await tapNext(page);
+  await tap(page, '#btn-brew-quit');
+  await page.waitForSelector('#screen-home:not([hidden])');
+
+  // ---- the grown-ups' corner shows the words, and a facts reset leaves them alone
+  await openGrownUps(page, browserName);
+  check((await page.locator('#word-input').inputValue()) === old.words.join('\n'), `${tag}: the word box shows the saved words`);
+  check((await page.locator('#parent-preview .chip').allInnerTexts()).join() === old.words.join(), `${tag}: so does the list under it`);
+  check((await page.locator('#math-level .seg-btn[aria-pressed="true"]').getAttribute('data-level')) === 'easy' &&
+    (await page.locator('#math-topics .toggle[aria-pressed="true"]').evaluateAll((nodes) => nodes.map((node) => node.dataset.topic).join())) === 'sub',
+    `${tag}: the math level and topics are as saved`);
+  check(/2 facts practiced/.test(await page.locator('#facts-summary').innerText()), `${tag}: the two drill answers are in the fact list`, await page.locator('#facts-summary').innerText());
+  await page.locator('#btn-reset-facts').evaluate((node) => node.scrollIntoView({ block: 'center' }));
+  await tap(page, '#btn-reset-facts');
+  await tap(page, '#btn-reset-facts');
+  let now = await readSaved(page);
+  check(JSON.stringify(Object.keys(now)) === JSON.stringify(Object.keys(old)) && JSON.stringify(Object.keys(now.math)) === JSON.stringify(Object.keys(old.math)),
+    `${tag}: the save has the same fields as before, in the same order`, Object.keys(now).join());
+  check(JSON.stringify(now.words) === JSON.stringify(old.words) && now.custom === true && now.roundSize === 3, `${tag}: the word list is untouched`, JSON.stringify(now.words));
+  check(JSON.stringify(now.progress.because) === JSON.stringify(old.progress.because) && now.progress.friend.step === 3 && now.progress.friend.mastered === 0,
+    `${tag}: spelling progress is untouched, apart from the spell just cast`, JSON.stringify(now.progress));
+  check(JSON.stringify(now.math.topics) === JSON.stringify(old.math.topics) && now.math.level === 'easy' && now.math.brewed === 8, `${tag}: math settings are untouched and the potions are counted`, JSON.stringify(now.math));
+  check(now.stars === 18 && now.robe === 'bubblegum' && now.familiar === 'owl' && now.chimes === false, `${tag}: stars went up by what was earned; robe, familiar and chimes are as saved`, `${now.stars} ${now.robe} ${now.familiar} ${now.chimes}`);
+  check((await keysInStorage()) === [FACTS_KEY, STORE_KEY].sort().join(), `${tag}: the fact memory is the only new key`, await keysInStorage());
+
+  // ---- a grown-up can still save words, and everything survives a reload
+  await page.locator('.parent-body').evaluate((node) => { node.scrollTop = 0; });
+  await page.locator('#word-input').fill("because\nfriend\npeople\ndon't\nmagic");
+  await tap(page, '#btn-save-words');
+  check(/Saved 5 words/.test(await page.locator('#parent-message').innerText()), `${tag}: a new word can be added to the list`, await page.locator('#parent-message').innerText());
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForSelector('#screen-home:not([hidden])');
+  now = await readSaved(page);
+  check(now.words.join() === "because,friend,people,don't,magic" && now.stars === 18 && now.progress.because.mastered === 1 && now.robe === 'bubblegum',
+    `${tag}: words, stars, progress and robe survive a reload`, JSON.stringify(now.words));
+  check(/1 of 5 words mastered/.test(await page.locator('#btn-spells').innerText()), `${tag}: the home screen shows the new list`);
+  check(problems.length === 0, `${tag}: no errors in the browser console`, problems.slice(0, 3).join(' | '));
+  await context.close();
+}
+
+// ================================================================ the math review (mathup/REVIEW-MATH.md)
+// One scenario for each finding of the independent review of the math update.
+
+const MINUTE = 60 * 1000;
+const HOUR = 60 * MINUTE;
+const SPEEDY_EARNED = { make10: { unlocked: true, plays: 0, best: null } };
+
+// The nine make-10 pairs for a seeded fact memory: the `quick` ones are quick, the rest as `other(n)` says.
+const seededPairs = (quick, other) => Object.fromEntries([1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => [`${n}+?=10`, quick.includes(n) ? savedFact(3) : other(n)]));
+
+// Puts a fact memory into localStorage and opens the game again, like coming back to it later.
+async function reopenWith(page, facts) {
+  await page.evaluate(([key, value]) => window.localStorage.setItem(key, JSON.stringify(value)), [FACTS_KEY, facts]);
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForSelector('#screen-home:not([hidden])');
+}
+
+const leaveGrownUps = async (page) => {
+  await tap(page, '#screen-parent .parent-buttons-end [data-go="home"]');
+  await page.waitForSelector('#screen-home:not([hidden])');
+};
+
+// ---------------------------------------------------------------- math fix 1: two saves, each watched on its own
+
+async function partlyFailedSave(browser, browserName, baseUrl) {
+  const words = ['because', 'friend'];
+  const refuse = (page, key) => page.evaluate((key) => { window.__storageFull = key; }, key);
+  const saveWords = async (page, text) => {
+    await page.locator('.parent-body').evaluate((node) => { node.scrollTop = 0; });
+    await page.locator('#word-input').fill(text);
+    await tap(page, '#btn-save-words');
+    return (await page.locator('#parent-message').innerText()).trim();
+  };
+  const oneDrillPotion = async (page) => {
+    await startPotions(page, '#btn-drill-make10');
+    const { kind } = await brewOne(page);
+    await tapNext(page);
+    await tap(page, '#btn-brew-quit');
+    await page.waitForSelector('#screen-home:not([hidden])');
+    return kind;
+  };
+
+  // ---- the reviewer's steps: the word list is refused, then a reset of the math facts is kept
+  let tag = 'words not saved, facts saved';
+  const first = await openPage(browser, baseUrl, SIZES[0], {
+    reducedMotion: 'reduce', storage: 'picky', saved: { words, custom: true, stars: 4 },
+    savedFacts: { facts: { '8+5': savedFact(1, { pace: 'slow', times: [9000], seen: 1, right: 1 }) }, speed: {} },
+  });
+  let page = first.page;
+  await openGrownUps(page, browserName);
+  check(!(await isShowing(page, '#save-note')), `${tag}: no notice while everything can be saved`);
+  await refuse(page, STORE_KEY);
+  let message = await saveWords(page, 'banana');
+  check(/this visit only/.test(message) && !/^Saved/.test(message), `${tag}: the new word list is not called saved`, message);
+  check(await isShowing(page, '#save-note'), `${tag}: the notice appears`);
+  check(JSON.stringify((await readSaved(page)).words) === JSON.stringify(words), `${tag}: the old list is still what is stored`);
+  await page.locator('#btn-reset-facts').evaluate((node) => node.scrollIntoView({ block: 'center' }));
+  await tap(page, '#btn-reset-facts');
+  await tap(page, '#btn-reset-facts');
+  check(JSON.stringify(await readFacts(page)) === '{"facts":{},"speed":{}}' && /Math facts were reset\. Stars and words are untouched/.test(await page.locator('#facts-message').innerText()),
+    `${tag}: the reset of the math facts is saved, and says so`, await page.locator('#facts-message').innerText());
+  check(await isShowing(page, '#save-note'), `${tag}: the notice stays, because the word list is still not saved`);
+  await leaveGrownUps(page);
+  check((await oneDrillPotion(page)) === 'brewed' && Object.keys((await readFacts(page)).facts).length === 1, `${tag}: a fact answer is saved as well`);
+  await openGrownUps(page, browserName);
+  check(await isShowing(page, '#save-note'), `${tag}: the notice is still there after playing and coming back`);
+  check((await page.locator('#parent-preview .chip').allInnerTexts()).join() === 'banana' && JSON.stringify((await readSaved(page)).words) === JSON.stringify(words),
+    `${tag}: the new list is used for this visit, the stored one is the old one`);
+  await refuse(page, false);
+  await tap(page, '#round-size [data-size="3"]');
+  check(JSON.stringify((await readSaved(page)).words) === '["banana"]' && (await readSaved(page)).stars === 6, `${tag}: once the save fits again, the next change saves the word list and the stars too`, JSON.stringify(await readSaved(page)));
+  check(!(await isShowing(page, '#save-note')), `${tag}: only then does the notice go away`);
+  check(first.problems.length === 0, `${tag}: no errors in the browser console`, first.problems.slice(0, 3).join(' | '));
+  await first.context.close();
+
+  // ---- the other way round: the fact memory is refused, the game save is kept
+  tag = 'facts not saved, words saved';
+  const second = await openPage(browser, baseUrl, SIZES[1], { reducedMotion: 'reduce', storage: 'picky', saved: { words, custom: true, stars: 4 } });
+  page = second.page;
+  await refuse(page, FACTS_KEY);
+  check((await oneDrillPotion(page)) === 'brewed', `${tag}: a drill potion brews`);
+  check((await readFacts(page)) === null && (await readSaved(page)).stars === 6, `${tag}: the stars were saved, the fact answer was not`, JSON.stringify(await readFacts(page)));
+  await openGrownUps(page, browserName);
+  check(await isShowing(page, '#save-note'), `${tag}: the notice is up, though the last save (the stars) worked`);
+  check(/1 fact practiced/.test(await page.locator('#facts-summary').innerText()), `${tag}: the fact is remembered for this visit`);
+  message = await saveWords(page, 'banana');
+  check(/^Saved 1 word/.test(message) && JSON.stringify((await readSaved(page)).words) === '["banana"]', `${tag}: the word list is saved, and says so`, message);
+  check(await isShowing(page, '#save-note'), `${tag}: the notice stays, because the math facts are still not saved`);
+  await leaveGrownUps(page);
+  await openGrownUps(page, browserName);
+  check(await isShowing(page, '#save-note'), `${tag}: ... also after leaving the grown-ups' corner and coming back`);
+  await leaveGrownUps(page);
+  await refuse(page, false);
+  check((await oneDrillPotion(page)) === 'brewed', `${tag}: another drill potion brews`);
+  check(Object.keys((await readFacts(page)).facts).length === 2, `${tag}: once it fits again the whole fact memory is saved, the earlier answer too`, JSON.stringify(await readFacts(page)));
+  await openGrownUps(page, browserName);
+  check(!(await isShowing(page, '#save-note')), `${tag}: only then does the notice go away`);
+  check(second.problems.length === 0, `${tag}: no errors in the browser console`, second.problems.slice(0, 3).join(' | '));
+  await second.context.close();
+}
+
+// ---------------------------------------------------------------- math fix 2: a speedy brew asks only facts that are quick
+
+async function speedyOnlyQuickFacts(browser, baseUrl) {
+  let tag = 'speedy brew after a slip';
+  const missed = () => savedFact(0, { due: true, miss: true, seen: 4, right: 3 });
+  const neverTwiceInARow = (sums) => sums.every((sum, i) => !i || sum !== sums[i - 1]);
+  const playSpeedy = async (page) => {
+    const sums = [];
+    for (let turn = 1; turn <= 8; turn++) sums.push((await speedyOne(page, turn)).seen.equation.join(' '));
+    await page.waitForSelector('#screen-done:not([hidden])');
+    return sums;
+  };
+  const openMenu = async (page) => {
+    await tap(page, '#btn-potions');
+    await page.waitForSelector('#screen-potions:not([hidden])');
+    return (await page.locator('#btn-speedy-make10 .menu-sub').innerText()).trim();
+  };
+
+  // ---- the reviewer's case: earned, then two pairs missed, and 8 + 5 answered once, slowly
+  const facts = seededPairs([1, 4, 5, 6, 7, 8, 9], missed);
+  facts['8+5'] = savedFact(1, { pace: 'slow', times: [9000], seen: 1, right: 1 });
+  const { context, page, problems } = await openPage(browser, baseUrl, SIZES[0], { reducedMotion: 'reduce', saved: { stars: 5 }, savedFacts: { facts, speed: SPEEDY_EARNED } });
+  let sub = await openMenu(page);
+  check(await isShowing(page, '#btn-speedy-make10') && sub === 'Just for fun!', `${tag}: the speedy brew is still there after two pairs were missed`, sub);
+  check((await page.locator('#btn-drill-make10 .menu-sub').innerText()) === '7 of 9 quick', `${tag}: the drill card says 7 of 9 are quick`);
+  await tap(page, '#btn-speedy-make10');
+  await page.waitForSelector('#screen-brew:not([hidden])');
+  check((await readHelp(page)).mode === 'speedy', `${tag}: it starts as a speedy brew`);
+  let sums = await playSpeedy(page);
+  check(sums.length === 8 && sums.every((sum) => /^[1456789] \+ \? = 10$/.test(sum)), `${tag}: every potion is one of the seven pairs that are quick`, sums.join(' | '));
+  check(!sums.some((sum) => /^[23] \+/.test(sum)), `${tag}: the two missed pairs are left out`, sums.join(' | '));
+  check(!sums.includes('8 + 5 = ?'), `${tag}: 8 + 5, which was never quick, is left out (it used to fill the round)`, sums.join(' | '));
+  check(new Set(sums).size === 7 && neverTwiceInARow(sums), `${tag}: with seven quick facts one comes twice, but not twice in a row`, sums.join(' | '));
+  check(/^You brewed 8 of 8 speedy potions/.test(await page.locator('#done-summary').innerText()), `${tag}: the round is 8 potions as always`);
+
+  // ---- four quick facts are enough: each comes twice
+  tag = 'speedy brew with four quick facts';
+  await reopenWith(page, { facts: seededPairs([6, 7, 8, 9], missed), speed: SPEEDY_EARNED });
+  sub = await openMenu(page);
+  check(sub === 'Just for fun!', `${tag}: it can still be played`, sub);
+  await tap(page, '#btn-speedy-make10');
+  await page.waitForSelector('#screen-brew:not([hidden])');
+  sums = await playSpeedy(page);
+  check(new Set(sums).size === 4 && sums.every((sum) => /^[6789] \+ \? = 10$/.test(sum)) && neverTwiceInARow(sums), `${tag}: the four come twice each, never twice in a row`, sums.join(' | '));
+
+  // ---- three are too few: practice first, and the speedy brew stays earned
+  tag = 'speedy brew with too few quick facts';
+  const slipped = (n) => (n <= 3 ? missed() : savedFact(2, { due: true, pace: 'slow', times: [8000] }));
+  await reopenWith(page, { facts: seededPairs([7, 8, 9], slipped), speed: SPEEDY_EARNED });
+  sub = await openMenu(page);
+  check(await isShowing(page, '#btn-speedy-make10'), `${tag}: its card is still in the menu (once earned, it stays)`);
+  check(/practice first/.test(sub) && /practice first/.test(await page.locator('#btn-speedy-make10').getAttribute('aria-label')), `${tag}: the card says that a little practice comes first`, sub);
+  await checkMenu(page, tag, ['make10']);
+  await shot(page, '27-speedy-practice-first-portrait');
+  const spokenBefore = (await spokenList(page)).length;
+  await tap(page, '#btn-speedy-make10');
+  await page.waitForSelector('#screen-brew:not([hidden])');
+  let help = await readHelp(page);
+  check(help.mode === 'drill' && help.buttons.join() === 'dots,hint', `${tag}: tapping it starts a round of practice, with Dots and Hint`, `${help.mode} ${help.buttons.join()}`);
+  const greeting = (await spokenList(page))[spokenBefore].text;
+  check(/practice/.test(greeting) && !/speedy/i.test(greeting), `${tag}: the greeting says so, kindly`, greeting);
+  sums = [];
+  const withDots = [];
+  for (let turn = 1; turn <= 8; turn++) {
+    help = await readHelp(page);
+    const { seen } = await brewOne(page);
+    sums.push(seen.equation.join(' '));
+    if (help.view === 'dots') withDots.push(seen.equation[0]);
+    await tapNext(page);
+  }
+  await page.waitForSelector('#screen-done:not([hidden])');
+  check(sums.slice(0, 6).map((sum) => sum[0]).sort().join('') === '123456' && sums.slice(0, 6).every((sum) => sum.endsWith('? = 10')), `${tag}: the practice asks the six pairs that slipped`, sums.join(' | '));
+  check(withDots.sort().join('') === '123', `${tag}: the missed ones come with their dots`, withDots.join());
+  await sleep(300);
+  check(await isShowing(page, '#speedy-offer') && !/New!/.test(await page.locator('#speedy-offer-text').innerText()), `${tag}: after the practice enough facts are quick again, and the speedy brew is offered`, await page.locator('#speedy-offer-text').innerText());
+  await tap(page, '#btn-offer-go');
+  await page.waitForSelector('#screen-brew:not([hidden])');
+  check((await readHelp(page)).mode === 'speedy', `${tag}: "Try it" starts the speedy brew`);
+  sums = await playSpeedy(page);
+  check(sums.every((sum) => /^[456789] \+ \? = 10$/.test(sum)), `${tag}: it asks the six that are quick now, not the three that needed their dots`, sums.join(' | '));
+
+  // ---- none at all: practice, no offer afterwards, and still earned
+  tag = 'speedy brew with no quick fact';
+  await reopenWith(page, { facts: seededPairs([], missed), speed: SPEEDY_EARNED });
+  sub = await openMenu(page);
+  check(await isShowing(page, '#btn-speedy-make10') && /practice first/.test(sub), `${tag}: the card stays and asks for practice first`, sub);
+  await tap(page, '#btn-speedy-make10');
+  await page.waitForSelector('#screen-brew:not([hidden])');
+  check((await readHelp(page)).mode === 'drill', `${tag}: tapping it starts practice`);
+  for (let turn = 1; turn <= 8; turn++) {
+    await brewOne(page);
+    await tapNext(page);
+  }
+  await page.waitForSelector('#screen-done:not([hidden])');
+  await sleep(300);
+  check(!(await isShowing(page, '#speedy-offer')) && await donePanelFits(page), `${tag}: no speedy brew is offered while nothing is quick`);
+  check((await readFacts(page)).speed.make10.unlocked === true, `${tag}: it stays earned all the same`);
+  check(problems.length === 0, 'speedy brew after a slip: no errors in the browser console', problems.slice(0, 3).join(' | '));
+  await context.close();
+}
+
+// ---------------------------------------------------------------- math fix 3: an answer nobody could time
+
+// The iPad is put down and picked up again while a potion is on screen.
+const putDownAndPickUp = (page) => page.evaluate(() => {
+  Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+  document.dispatchEvent(new Event('visibilitychange'));
+  delete document.hidden;
+  document.dispatchEvent(new Event('visibilitychange'));
+});
+
+async function untimedAnswers(browser, browserName, baseUrl) {
+  const tag = 'untimed answer';
+  const now = Date.now();
+  // 12 + 7 was slow twenty minutes ago and is due again; 6 + 6 is in the top box and due in an hour.
+  const seeded = {
+    '12+7': { box: 1, due: now - 10 * MINUTE, seen: 1, right: 1, times: [9000], last: now - 20 * MINUTE, miss: false, pace: 'slow' },
+    '6+6': { box: 5, due: now + HOUR, seen: 6, right: 6, times: [2000, 2100, 1900], last: now + HOUR - 16 * DAY, miss: false, pace: 'quick' },
+  };
+  const { context, page, problems } = await openPage(browser, baseUrl, SIZES[0], { reducedMotion: 'reduce', savedFacts: { facts: seeded, speed: {} } });
+  const data = await page.evaluate(() => {
+    const F = window.SPELLCASTER_FACTS;
+    const MIN = 60 * 1000;
+    const DAY = 24 * 60 * MIN;
+    const t0 = 1700000000000;
+    const quick = { ok: true, ms: 2500, helped: false };
+    const slow = { ok: true, ms: 9000, helped: false };
+    const away = { ok: true, ms: NaN, helped: false };
+    const copy = (value) => JSON.parse(JSON.stringify(value));
+    const listed = (store) => F.slowList(store).map((row) => `${row.key}:${row.why}:${row.ms}:${row.right}/${row.seen}`).join();
+    const out = {};
+
+    // A slow fact, asked again five minutes later while the iPad was put down.
+    let store = F.fresh();
+    const before = copy(F.record(store, '12+7', slow, t0));
+    const after = copy(F.record(store, '12+7', away, t0 + 5 * MIN));
+    out.slow = { before, after, listed: listed(store), early: F.review(store, t0 + 6 * MIN, 8), due: F.review(store, t0 + 11 * MIN, 8), reloaded: copy(F.clean(copy(store)).facts['12+7']) };
+
+    // A fact in the top box, an hour before its day, and then a day after it.
+    const top = F.fresh();
+    let at = t0;
+    let f;
+    for (let n = 0; n < 5; n++) {
+      f = F.record(top, '6+6', quick, at);
+      at = f.due + MIN;
+    }
+    const topBefore = copy(f);
+    const early = copy(F.record(top, '6+6', away, topBefore.due - 60 * MIN));
+    const reloaded = copy(F.clean(copy(top)).facts['6+6']);
+    const late = copy(F.record(top, '6+6', away, topBefore.due + DAY));
+    const stillDue = F.review(top, topBefore.due + DAY + MIN, 8);
+    const timed = copy(F.record(top, '6+6', quick, topBefore.due + DAY + 2 * MIN));
+    out.top = { before: topBefore, early, reloaded, late, stillDue, timed, gap: F.GAPS[5], at: topBefore.due + DAY + 2 * MIN };
+
+    // An answer that took longer than a minute cannot be told from an iPad left lying: also untimed.
+    store = F.fresh();
+    F.record(store, '9+4', slow, t0);
+    out.long = copy(F.record(store, '9+4', { ok: true, ms: 95000, helped: false }, t0 + MIN));
+
+    // A missed fact that is then right, untimed: the miss is mended, and it is asked again soon.
+    store = F.fresh();
+    F.record(store, '9+4', { ok: false, ms: 2500, helped: false }, t0);
+    out.mended = { f: copy(F.record(store, '9+4', away, t0 + MIN)), wait: F.get(store, '9+4').due - (t0 + MIN), listed: listed(store) };
+
+    // With the dots or the hint an untimed answer is still an answer with help.
+    store = F.fresh();
+    for (let n = 0; n < 3; n++) F.record(store, '9+4', quick, t0 + n);
+    out.helped = copy(F.record(store, '9+4', { ok: true, ms: NaN, helped: true }, t0 + MIN));
+    out.GAP1 = F.GAPS[1];
+    return out;
+  });
+
+  // ---- the fact memory itself
+  const { slow, top } = data;
+  check(slow.after.pace === 'slow' && slow.after.box === slow.before.box && slow.after.due === slow.before.due, `${tag}: a slow fact stays slow, in its box and due on its day`, JSON.stringify(slow.after));
+  check(slow.after.seen === 2 && slow.after.right === 2 && slow.after.times.join() === '9000', `${tag}: the answer is counted as right, and no time is made up for it`, JSON.stringify(slow.after));
+  check(slow.listed === '12+7:slow:9000:2/2', `${tag}: the fact stays on the slow list, with the time that was measured`, slow.listed);
+  check(JSON.stringify(slow.early) === '[]' && JSON.stringify(slow.due) === '[[12,7]]', `${tag}: it is reviewed when its ten minutes are over, not put off`, `${JSON.stringify(slow.early)} ${JSON.stringify(slow.due)}`);
+  check(JSON.stringify(slow.reloaded) === JSON.stringify(slow.after), `${tag}: saved and loaded again it is the same`, JSON.stringify(slow.reloaded));
+  check(top.early.box === 5 && top.early.due === top.before.due && top.early.pace === 'quick' && top.early.seen === 6, `${tag}: a top-box fact asked an hour early keeps its day (it used to move 16 days on)`, `due moved by ${top.early.due - top.before.due} ms`);
+  check(JSON.stringify(top.reloaded) === JSON.stringify(top.early), `${tag}: ... also after saving and loading`, JSON.stringify(top.reloaded));
+  check(top.late.due === top.before.due && JSON.stringify(top.stillDue) === '[[6,6]]', `${tag}: an overdue fact stays due until an answer can be timed`, JSON.stringify(top.stillDue));
+  check(top.timed.due === top.at + top.gap && top.timed.box === 5, `${tag}: the next timed answer counts as always`, JSON.stringify(top.timed));
+  check(data.long.pace === 'slow' && data.long.box === 1 && data.long.times.join() === '9000', `${tag}: an answer after more than a minute is untimed too, and changes nothing`, JSON.stringify(data.long));
+  check(data.mended.f.miss === false && data.mended.f.box === 1 && data.mended.f.pace === 'away' && data.mended.wait === data.GAP1 && data.mended.listed === '',
+    `${tag}: a missed fact that is then right is mended, and asked again after ten minutes`, JSON.stringify(data.mended));
+  check(data.helped.pace === 'helped' && data.helped.box === 1, `${tag}: an untimed answer with the dots showing still counts as helped`, JSON.stringify(data.helped));
+
+  // ---- in the game: the iPad is put down in the middle of two potions
+  await useRound(page, [['add', 12, 7], ['add', 6, 6], ['add', 2, 2]]);
+  await startPotions(page);
+  for (const sum of ['12 + 7 = ?', '6 + 6 = ?']) {
+    const seen = await readBrew(page);
+    check(seen.equation.join(' ') === sum && !(await readHelp(page)).open, `${tag}: ${sum} is asked, without help`, seen.equation.join(' '));
+    await putDownAndPickUp(page);
+    check((await brewOne(page)).kind === 'brewed', `${tag}: ${sum} still brews after the iPad was put down`);
+    await tapNext(page);
+  }
+  await tap(page, '#btn-brew-quit');
+  await page.waitForSelector('#screen-home:not([hidden])');
+  const check12and6 = async (when) => {
+    const facts = (await readFacts(page)).facts;
+    check(facts['12+7'].pace === 'slow' && facts['12+7'].box === 1 && facts['12+7'].due === seeded['12+7'].due && facts['12+7'].seen === 2 && facts['12+7'].right === 2,
+      `${tag}, ${when}: 12 + 7 is still slow and still due`, JSON.stringify(facts['12+7']));
+    check(facts['6+6'].box === 5 && facts['6+6'].due === seeded['6+6'].due && facts['6+6'].pace === 'quick' && facts['6+6'].seen === 7,
+      `${tag}, ${when}: 6 + 6 is still due in an hour, not in 16 days`, `due moved by ${facts['6+6'].due - seeded['6+6'].due} ms`);
+  };
+  await check12and6('in the game');
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForSelector('#screen-home:not([hidden])');
+  await openGrownUps(page, browserName);
+  const rows = await page.locator('#slow-facts .fact-row').evaluateAll((nodes) => nodes.map((row) => `${row.querySelector('.fact-name').textContent} — ${row.querySelector('.fact-note').textContent}`));
+  check(rows.join() === '12 + 7 — took 9 seconds · right 2 of 2', `${tag}: after a reload the grown-ups still see 12 + 7 as slow`, rows.join(' | '));
+  await leaveGrownUps(page);
+  await useRound(page, [['add', 2, 2]]); // one more answer, so that what was loaded is written out again
+  await startPotions(page);
+  check((await brewOne(page)).kind === 'brewed' && Object.keys((await readFacts(page)).facts).length === 3, `${tag}: after a reload another potion brews and the fact memory is saved again`);
+  await check12and6('loaded and saved again');
+  check(problems.length === 0, `${tag}: no errors in the browser console`, problems.slice(0, 3).join(' | '));
+  await context.close();
+}
+
+// ---------------------------------------------------------------- math fix 4: spaced repeats in mixed rounds until a fact is quick
+
+async function spacedReviewInMixedRounds(browser, baseUrl) {
+  let tag = 'mixed review';
+  const now = Date.now();
+  const onlyAdd = Object.fromEntries(ALL_TOPICS.map((id) => [id, id === 'add']));
+  // 13 + 5 belongs to no drill, and the easy level never makes it up by itself (its first number stops at 12),
+  // so it can only come back through the fact memory. It was slow a quarter of an hour ago.
+  const seeded = { '13+5': { box: 1, due: now - 5 * MINUTE, seen: 1, right: 1, times: [9000], last: now - 15 * MINUTE, miss: false, pace: 'slow' } };
+  const { context, page, problems } = await openPage(browser, baseUrl, SIZES[1], {
+    reducedMotion: 'reduce', saved: { math: { level: 'easy', topics: onlyAdd, brewed: 0 } }, savedFacts: { facts: seeded, speed: {} },
+  });
+  const data = await page.evaluate(() => {
+    const F = window.SPELLCASTER_FACTS;
+    const MIN = 60 * 1000;
+    const DAY = 24 * 60 * MIN;
+    const t0 = 1700000000000;
+    const quick = { ok: true, ms: 2500, helped: false };
+    const slow = { ok: true, ms: 9000, helped: false };
+    const copy = (value) => JSON.parse(JSON.stringify(value));
+    const out = {};
+    // slow -> quick at the ten-minute review -> due the next day -> quick -> due three days on -> ...
+    let store = F.fresh();
+    F.record(store, '12+7', slow, t0);
+    const second = copy(F.record(store, '12+7', quick, t0 + 11 * MIN));
+    out.second = { box: second.box, wait: second.due - (t0 + 11 * MIN), pace: second.pace, quick: F.isQuick(store, '12+7'), listed: F.slowList(store).length };
+    out.sameDay = F.review(store, t0 + 3 * 60 * MIN, 8);
+    out.nextDay = F.review(store, second.due + MIN, 8);
+    store = F.clean(copy(store)); // another day, another visit
+    const third = copy(F.record(store, '12+7', quick, second.due + MIN));
+    out.third = { box: third.box, wait: third.due - (second.due + MIN), quick: F.isQuick(store, '12+7') };
+    out.tooSoon = F.review(store, third.due - DAY, 8);
+    out.onItsDay = F.review(store, third.due + MIN, 8);
+    store = F.clean(copy(store));
+    const fourth = copy(F.record(store, '12+7', quick, third.due + MIN));
+    out.fourth = { box: fourth.box, wait: fourth.due - (third.due + MIN) };
+    out.GAPS = F.GAPS;
+
+    // Which come first, and the limit: missed, slow, then the rest by box. A make-10 pair waits for its drill.
+    store = F.fresh();
+    for (let n = 0; n < 3; n++) F.record(store, '9+5', quick, t0);       // box 3
+    F.record(store, '9+4', quick, t0);                                   // box 1, never slow
+    for (let n = 0; n < 5; n++) F.record(store, '9+3', quick, t0 + n * 20 * DAY - 400 * DAY); // top box ...
+    F.record(store, '9+3', slow, t0);                                    // ... and slow last time
+    F.record(store, '9+2', { ok: false, ms: 2500, helped: false }, t0);  // missed
+    F.record(store, '4+?=10', slow, t0);
+    out.boxes = ['9+2', '9+3', '9+4', '9+5'].map((key) => F.boxOf(store, key)).join();
+    out.order = Array.from({ length: 10 }, () => JSON.stringify(F.review(store, t0 + 4 * DAY, 8)));
+    out.capped = [1, 2, 3].map((limit) => JSON.stringify(F.review(store, t0 + 4 * DAY, limit)));
+    out.quickCount = [F.isQuick(store, '9+3'), F.isQuick(store, '9+5'), F.summary(store)];
+    return out;
+  });
+
+  // ---- the fact memory itself
+  check(data.second.box === 2 && data.second.wait === data.GAPS[2] && data.second.pace === 'quick' && data.second.quick === false && data.second.listed === 0,
+    `${tag}: a slow fact answered quickly once moves up a box and off the slow list, but is not quick yet`, JSON.stringify(data.second));
+  check(JSON.stringify(data.sameDay) === '[]', `${tag}: it is not asked again the same day`, JSON.stringify(data.sameDay));
+  check(JSON.stringify(data.nextDay) === '[[12,7]]', `${tag}: the next day it is due and reviewed, though its last answer was quick (it used to be dropped here)`, JSON.stringify(data.nextDay));
+  check(data.third.box === 3 && data.third.wait === data.GAPS[3] && data.third.quick === true, `${tag}: a second quick answer on another day makes it quick`, JSON.stringify(data.third));
+  check(JSON.stringify(data.tooSoon) === '[]' && JSON.stringify(data.onItsDay) === '[[12,7]]', `${tag}: a quick fact rests for its three days, then comes back once`, `${JSON.stringify(data.tooSoon)} ${JSON.stringify(data.onItsDay)}`);
+  check(data.fourth.box === 4 && data.fourth.wait === data.GAPS[4], `${tag}: ... and then waits a week: the waits keep growing`, JSON.stringify(data.fourth));
+  check(data.boxes === '0,4,1,3' && new Set(data.order).size === 1 && data.order[0] === '[[9,2],[9,3],[9,4],[9,5]]',
+    `${tag}: missed first, then slow (whatever its box), then the others whose wait is over, lowest box first`, `${data.order[0]} (boxes ${data.boxes})`);
+  check(data.capped.join(' ') === '[[9,2]] [[9,2],[9,3]] [[9,2],[9,3],[9,4]]', `${tag}: the limit cuts the list from the end`, data.capped.join(' '));
+  check(data.quickCount[0] === false && data.quickCount[1] === true && data.quickCount[2].quick === 1 && data.quickCount[2].slow === 3,
+    `${tag}: a fact that was slow last time is not counted as quick, whatever its box`, JSON.stringify(data.quickCount));
+
+  // ---- in the game, over five visits (the saved fact memory is moved back in time between them)
+  const visit = async () => {
+    await page.evaluate(() => {
+      const P = window.SPELLCASTER_POTIONS;
+      const make = P.makeRound;
+      P.makeRound = (settings, count, review) => {
+        window.__review = review.map((pair) => pair.join('+')).join();
+        return make(settings, count, review);
+      };
+    });
+    await startPotions(page);
+    return { review: await page.evaluate(() => window.__review), first: (await readBrew(page)).equation.join(' ') };
+  };
+  const answerFirst = async () => {
+    const { kind } = await brewOne(page);
+    await tapNext(page);
+    return { kind, fact: (await readFacts(page)).facts['13+5'] };
+  };
+  const later = async (ms) => {
+    const facts = await readFacts(page);
+    for (const f of Object.values(facts.facts)) {
+      f.due -= ms;
+      f.last -= ms;
+    }
+    await reopenWith(page, facts);
+  };
+  let seen = await visit();
+  check(seen.review === '13+5' && seen.first === '13 + 5 = ?', `${tag}, visit 1: the slow fact is reviewed first`, `${seen.review} / ${seen.first}`);
+  let got = await answerFirst();
+  check(got.kind === 'brewed' && got.fact.box === 2 && got.fact.pace === 'quick', `${tag}, visit 1: answered quickly, it moves up to box 2`, JSON.stringify(got.fact));
+  await later(2 * HOUR);
+  seen = await visit();
+  check(seen.review === '' && seen.first !== '13 + 5 = ?', `${tag}, two hours later: it rests (nothing to review)`, `${seen.review} / ${seen.first}`);
+  await later(DAY);
+  seen = await visit();
+  check(seen.review === '13+5' && seen.first === '13 + 5 = ?', `${tag}, the next day: it is reviewed again, though its last answer was quick`, `${seen.review} / ${seen.first}`);
+  got = await answerFirst();
+  check(got.fact.box === 3 && got.fact.seen === 3 && got.fact.right === 3, `${tag}, the next day: a second quick answer makes it quick (box 3)`, JSON.stringify(got.fact));
+  await later(DAY);
+  seen = await visit();
+  check(seen.review === '', `${tag}, a day after that: a quick fact rests for three days`, seen.review);
+  await later(2 * DAY + HOUR);
+  seen = await visit();
+  check(seen.review === '13+5' && seen.first === '13 + 5 = ?', `${tag}, three days on: it comes back once to stay fresh`, `${seen.review} / ${seen.first}`);
+  got = await answerFirst();
+  check(got.fact.box === 4 && got.fact.due - Date.now() > 6 * DAY, `${tag}, three days on: answered quickly, it now waits a week`, JSON.stringify(got.fact));
+
+  // ---- within 100 a mixed round still reviews one fact only, the one most in need; none with Adding off
+  tag = 'mixed review within 100';
+  const three = {
+    '9+4': savedFact(2, { due: true }),
+    '9+3': savedFact(1, { due: true, pace: 'slow', times: [9000] }),
+    '9+2': savedFact(0, { due: true, miss: true, seen: 2, right: 1 }),
+  };
+  const setMath = (topics) => page.evaluate(([key, topics]) => {
+    window.localStorage.setItem(key, JSON.stringify({ math: { level: 'hundred', topics, brewed: 0 } }));
+  }, [STORE_KEY, topics]);
+  await setMath(Object.fromEntries(ALL_TOPICS.map((id) => [id, true])));
+  await reopenWith(page, { facts: three, speed: {} });
+  seen = await visit();
+  check(seen.review === '9+2', `${tag}: one review a round, and it is the missed fact`, seen.review);
+  await setMath(Object.fromEntries(ALL_TOPICS.map((id) => [id, id !== 'add'])));
+  await reopenWith(page, { facts: three, speed: {} });
+  seen = await visit();
+  check(seen.review === '', `${tag}: with Adding switched off nothing is reviewed`, seen.review);
+  check(problems.length === 0, `${tag}: no errors in the browser console`, problems.slice(0, 3).join(' | '));
+  await context.close();
+}
+
+// ---------------------------------------------------------------- math fix 5: the stopwatch leaves out the voice
+
+async function stopwatchLeavesOutTheVoice(browser, baseUrl) {
+  let tag = 'stopwatch';
+  const LASTS = 1500; // every sentence takes this long here, like a real voice
+  const THINK = 4000;
+  const { context, page, problems } = await openPage(browser, baseUrl, SIZES[1], { reducedMotion: 'reduce', clock: true, speech: { lasts: LASTS } });
+  const talking = () => page.evaluate(() => window.__talking);
+  const quiet = () => page.waitForFunction(() => !window.__talking, null, { timeout: 10000 });
+  const think = (ms) => page.evaluate((ms) => window.__wait(ms), ms);
+  const timeOf = async (key) => {
+    const f = (await readFacts(page)).facts[key];
+    return f ? { ms: f.times[f.times.length - 1], pace: f.pace, times: f.times.length } : { ms: -1, pace: 'not saved', times: 0 };
+  };
+  // A little slack for the taps themselves; the old stopwatch was a whole sentence or more over.
+  const about = (time, ms) => time.ms >= ms && time.ms < ms + 1300;
+
+  await useRound(page, [['add', 9, 4], ['add', 8, 3], ['add', 7, 5], ['add', 6, 3], ['add', 5, 4], ['add', 4, 3]]);
+  const before = Date.now();
+  await startPotions(page);
+  check(await talking(), `${tag}: the greeting is being spoken while the first potion is already on screen`);
+  await quiet();
+  const listened = Date.now() - before;
+  check(listened >= 2 * LASTS - 200, `${tag}: the greeting and the first question take their time here`, `${listened} ms`);
+  const said = (await spokenList(page)).slice(-2).map((s) => s.text);
+  check(/brew some potions/.test(said[0]) && said[1] === 'What is 9 plus 4?', `${tag}: (they are the greeting and the question)`, said.join(' | '));
+  await think(THINK);
+  await brewOne(page);
+  const first = await timeOf('9+4');
+  check(about(first, THINK) && first.pace === 'quick', `${tag}: the first potion is timed from when the voice is done, so four seconds of thinking is a quick answer`, JSON.stringify(first));
+  await tapNext(page);
+
+  await quiet();
+  await think(THINK);
+  await brewOne(page);
+  const second = await timeOf('8+3');
+  check(about(second, THINK) && second.pace === 'quick', `${tag}: a later potion is timed the same way`, JSON.stringify(second));
+  check(Math.abs(second.ms - first.ms) < 800, `${tag}: the first potion and a later one get the same time for the same thinking`, `${first.ms} ms and ${second.ms} ms`);
+  await tapNext(page);
+
+  // An answer before the voice is done.
+  await tapDigits(page, '12');
+  check(await talking(), `${tag}: (the third question is still being read)`);
+  check((await brewAndSeeResult(page)) === 'brewed', `${tag}: a potion can be brewed while the question is still being read`);
+  const third = await timeOf('7+5');
+  check(third.times === 1 && third.ms >= 1 && third.ms < 1000 && third.pace === 'quick', `${tag}: such an answer is a quick one, not one that could not be timed`, JSON.stringify(third));
+  await tapNext(page);
+
+  // "Hear it again" and "Slowly" in the middle of thinking.
+  for (const [button, key, name] of [['#btn-brew-hear', '6+3', 'Hear it again'], ['#btn-brew-slow', '5+4', 'Slowly']]) {
+    await quiet();
+    await think(THINK / 2);
+    await tap(page, button);
+    check(await talking(), `${tag}: "${name}" reads the question once more`);
+    await quiet();
+    await think(THINK / 2);
+    await brewOne(page);
+    const again = await timeOf(key);
+    check(about(again, THINK) && again.pace === 'quick', `${tag}: listening with "${name}" is not counted as thinking, the time before and after it is`, JSON.stringify(again));
+    await tapNext(page);
+  }
+
+  // A browser that never says the sentence is over.
+  await page.evaluate(() => { window.__speechLasts = 'forever'; });
+  await tap(page, '#btn-brew-hear');
+  await sleep(100);
+  check(await talking(), `${tag}: (this sentence never ends)`);
+  await think(20000);
+  await brewOne(page);
+  const stuck = await timeOf('4+3');
+  check(stuck.pace === 'slow' && stuck.ms >= 12000 && stuck.ms < 20000, `${tag}: a voice that never reports the end cannot stop the stopwatch for good: twenty seconds is still slow`, JSON.stringify(stuck));
+  check(problems.length === 0, `${tag}: no errors in the browser console`, problems.slice(0, 3).join(' | '));
+  await context.close();
+
+  // ---- without a voice, and with one that fails, the potion is timed from the moment it appears
+  for (const [name, speech] of [['no voice', 'none'], ['a voice that fails', { lasts: LASTS, error: 'not-allowed' }]]) {
+    tag = `stopwatch, ${name}`;
+    const plain = await openPage(browser, baseUrl, SIZES[1], { reducedMotion: 'reduce', clock: true, speech });
+    await useRound(plain.page, [['add', 9, 4], ['add', 2, 2]]);
+    await startPotions(plain.page);
+    await sleep(150);
+    await plain.page.evaluate((ms) => window.__wait(ms), THINK);
+    check((await brewOne(plain.page)).kind === 'brewed', `${tag}: the potion brews`);
+    const f = (await readFacts(plain.page)).facts['9+4'];
+    check(f.pace === 'quick' && f.times[0] >= THINK && f.times[0] < THINK + 1300, `${tag}: four seconds of thinking are four seconds`, JSON.stringify(f));
+    check(plain.problems.length === 0, `${tag}: no errors in the browser console`, plain.problems.slice(0, 3).join(' | '));
+    await plain.context.close();
+  }
+}
+
+// ---------------------------------------------------------------- math fix 6: speedy potions count as brewed
+
+async function speedyPotionsCount(browser, browserName, baseUrl) {
+  const tag = 'speedy potions counted';
+  const { context, page, problems } = await openPage(browser, baseUrl, SIZES[0], {
+    reducedMotion: 'reduce', saved: { stars: 5, math: { brewed: 5 } }, savedFacts: { facts: seededPairs([1, 2, 3, 4, 5, 6, 7, 8, 9]), speed: SPEEDY_EARNED },
+  });
+  const brewedSaved = async () => (await readSaved(page)).math.brewed;
+  const homeLine = async () => (await page.locator('#potions-status').innerText()).trim();
+  check((await homeLine()) === '5 potions brewed', `${tag}: five potions were brewed before`, await homeLine());
+
+  // ---- a speedy brew with three potions missed: the five that worked are counted
+  await startPotions(page, '#btn-speedy-make10');
+  for (let turn = 1; turn <= 8; turn++) {
+    await speedyOne(page, turn, { miss: turn <= 3 });
+    if (turn === 7) check((await readSaved(page)).math.brewed === 5, `${tag}: nothing is counted before the speedy brew is finished`);
+  }
+  await page.waitForSelector('#screen-done:not([hidden])');
+  check(/^You brewed 5 of 8 speedy potions/.test(await page.locator('#done-summary').innerText()), `${tag}: the end card says 5 of 8`, await page.locator('#done-summary').innerText());
+  check((await brewedSaved()) === 10, `${tag}: the five that were brewed are added to the saved count, the three misses are not`, String(await brewedSaved()));
+  await tap(page, '#btn-done-home');
+  check((await homeLine()) === '10 potions brewed', `${tag}: the home screen shows them`, await homeLine());
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForSelector('#screen-home:not([hidden])');
+  check((await homeLine()) === '10 potions brewed' && (await brewedSaved()) === 10, `${tag}: also after a reload`, await homeLine());
+
+  // ---- a second one with every potion right, then one that is left in the middle
+  await startPotions(page, '#btn-speedy-make10');
+  for (let turn = 1; turn <= 8; turn++) await speedyOne(page, turn);
+  await page.waitForSelector('#screen-done:not([hidden])');
+  check((await brewedSaved()) === 18, `${tag}: a second speedy brew adds its eight, once`, String(await brewedSaved()));
+  await tap(page, '#btn-again');
+  await page.waitForSelector('#screen-brew:not([hidden])');
+  check((await brewedSaved()) === 18, `${tag}: "Play again" does not count the finished round a second time`, String(await brewedSaved()));
+  await speedyOne(page, 1);
+  await speedyOne(page, 2);
+  await tap(page, '#btn-brew-quit');
+  await page.waitForSelector('#screen-home:not([hidden])');
+  check((await brewedSaved()) === 18 && (await homeLine()) === '18 potions brewed', `${tag}: a speedy brew left in the middle changes nothing`, await homeLine());
+  await openGrownUps(page, browserName);
+  check(/18 potions brewed/.test(await page.locator('#parent-progress').innerText()), `${tag}: the grown-ups' corner shows the same count`, await page.locator('#parent-progress').innerText());
+  check(problems.length === 0, `${tag}: no errors in the browser console`, problems.slice(0, 3).join(' | '));
+  await context.close();
 }
 
 // ---------------------------------------------------------------- run
@@ -2497,6 +4358,20 @@ const scenarios = [
   ['review 9: a keyboard cannot enter answers', (b, name, url) => keyboardCannotAnswer(b, url)],
   // The one finding the second review (REVIEW2.md) sent back.
   ['review 2 again: a failed voice stays failed when the voice list is refreshed', (b, name, url) => voiceListRefresh(b, name, url)],
+  // The math fluency update (MATH-BRIEF.md): `npm test -- math` runs just these.
+  ['math facts: boxes, spaced repeats and the drill recipes', (b, name, url) => factMemory(b, url)],
+  ['math helpers: ten-frames and the counting-on hint on every iPad size', (b, name, url) => factHelpers(b, url)],
+  ['math drills: Make 10 and Doubles from the Potions menu', (b, name, url) => factDrills(b, url)],
+  ['math speedy brew: offered only when earned, gentle and optional', (b, name, url) => speedyBrews(b, name, url)],
+  ['math slow facts and their reset in the grown-ups corner', (b, name, url) => factsForGrownUps(b, name, url)],
+  ['math update keeps a save from before it: words, stars and spelling', (b, name, url) => oldSaveSurvives(b, name, url)],
+  // One scenario for each finding of the independent math review (mathup/REVIEW-MATH.md): `npm test -- "math fix"`.
+  ['math fix 1: a save that works does not hide another that failed', (b, name, url) => partlyFailedSave(b, name, url)],
+  ['math fix 2: a speedy brew asks only facts that are quick', (b, name, url) => speedyOnlyQuickFacts(b, url)],
+  ['math fix 3: an answer nobody could time changes nothing', (b, name, url) => untimedAnswers(b, name, url)],
+  ['math fix 4: mixed rounds keep reviewing a fact until it is quick, and after', (b, name, url) => spacedReviewInMixedRounds(b, url)],
+  ['math fix 5: the stopwatch leaves out the voice', (b, name, url) => stopwatchLeavesOutTheVoice(b, url)],
+  ['math fix 6: speedy potions count as brewed', (b, name, url) => speedyPotionsCount(b, name, url)],
 ];
 
 fs.mkdirSync(SHOTS, { recursive: true });

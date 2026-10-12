@@ -1,15 +1,124 @@
 # Progress
 
-Last updated: 2026-10-11
+Last updated: 2026-10-12
 
 ## Status
 
-Both modes are built, and all 9 findings of the independent review (`REVIEW.md`) are fixed,
-including the part of finding 2 that the second review (`REVIEW2.md`) sent back.
-`npm test` passes: **2,207 checks in the last full run, 21 scenarios, about 10.5 minutes** (625 s)
+Both modes are built, all review findings are fixed and committed (b96116c), and the
+**math fluency update** (`MATH-BRIEF.md`) is built on top: ten-frames, a counting-on hint, the
+Make 10 and Doubles drills, an optional speedy brew, and a fact memory with spaced repeats and a
+slow-facts list for grown-ups. The independent review of it (`mathup/REVIEW-MATH.md`) found six
+things, and **all six are fixed** (`mathup/fixes-log.md`). All of it is in the working tree and
+**not committed yet** (`public/`, `scripts/test.mjs`, this file; see `mathup/build-notes.md`).
+`npm test` passes: **3,899 checks in the last full run, 33 scenarios, about 12 minutes** (733 s)
 (Chromium; WebKit is not installed on this machine, so the suite fell back as designed).
-The first round of review fixes is committed (a549eb2). The fix for the second review is in the
-working tree and **not committed yet** (`public/game.js`, `scripts/test.mjs`, this file).
+The 12 math scenarios run by themselves are 1,693 checks and about 4.5 minutes (`npm test -- math`).
+
+## Math fluency update (MATH-BRIEF.md) — this change
+
+Mila counts addition facts on her fingers. Everything below lives in Potions and uses the number
+tiles only; nothing in Spells changed.
+
+- **Potions menu** (`#screen-potions`). The Potions button on the home screen now opens a menu:
+  🧪 Mixed potions (the round as before), 🎯 Make 10 and 🍒 Doubles. Under a drill its
+  ⚡ Speedy brew appears once it is earned. The menu tap is what wakes the voice.
+- **Ten-frames** (item 1). Every addition fact within 20 has a **Dots** button under the sum. It
+  shows two ten-frames, pink dots for the first number and teal dots (with a white heart, so they
+  differ by more than color) for the second. The second number carries on where the first stops,
+  so a full frame shows the ten (8 + 5: a full frame and 3). Doubles get a frame each; a near
+  double shows its "1 more" in gold; a make-10 pair shows one frame with its empty places.
+  After a miss the fact comes back **with its dots already showing**, in the same round and also
+  on a later day.
+- **Counting-on hint** (item 2). The **Hint** button shows "Start from the bigger number", the
+  bigger number in a bubble, and one hop for each dot of the smaller one (3 + 8: 8, then 9, 10, ?).
+  The hops come one after the other; with reduced motion they are all there at once. The last
+  hop is a "?": a hint shows the way, not the answer. It is read aloud. Other strategies have
+  their own hint: hop up to 10 (7 + ? = 10), make 10 first (8 + 2 = 10 ➜ 10 + 3 = ?) and a double
+  and 1 more (6 + 6 = 12 ➜ 12 + 1 = ?).
+- **Make 10 drill** (item 3): "7 + ? = 10" for 1 to 9, then sums that bridge through 10 with the
+  bigger number first (16 of them, 6 + 5 to 9 + 8). The result card shows `8 + 5 = 8 + 2 + 3 = 13`.
+  **Doubles drill**: 1 + 1 to 10 + 10, then near doubles both ways round (6 + 7 and 7 + 6); the
+  card shows `6 + 7 = 6 + 6 + 1 = 13`. A round is 8 potions: 6 core facts and 2 that build on
+  them, then 4 and 4 once half the core is quick, then 2 and 6 once all of it is.
+- **Speedy brew** (item 4). Offered only once every core fact of a drill is quick: on the
+  round-complete card (with "Not now") and from then on in the Potions menu. 8 potions, the facts
+  that are known best. No countdown and nothing ticking on screen, no result cards, no retries; a
+  wrong answer gets "Almost! 8 + 5 = 13" and the next potion. 3 stars for joining in, however it
+  goes. The end shows the time and celebrates a personal best (more potions first, then less
+  time); a slower run is told the best kindly. Leaving in the middle changes nothing, and once
+  earned it never goes away again. It asks **only facts that are quick right now** (never one that
+  is still being learned or that slipped, since Dots and Hint are put away here); with fewer than
+  eight of those some come twice, never twice in a row. With fewer than four its button stays but
+  says "A little practice first 💜" and starts a normal drill round, and no offer is made until
+  four are quick again. The potions brewed in a finished speedy brew count as brewed.
+- **Fact memory** (item 5), `public/facts.js`, saved under the **new key
+  `spellcaster-academy-facts-v1`**. For every fact: a Leitner box (0 to 5), when it is due, how
+  often it was asked and right, the last five answer times, and whether the last answer was
+  missed, slow or helped. Quick (right within 6 seconds, no dots, no hint) moves a fact up a box;
+  the waits grow: at once, 10 minutes, 1 day, 3 days, 7 days, 16 days. Slow costs one box and
+  brings the fact back after 10 minutes; helped goes to box 1; missed to box 0. Three quick
+  answers make a fact "quick" (as long as its last answer was not slow); after that it only
+  climbs when it is due, so one long sitting cannot push a fact weeks away.
+  **The stopwatch leaves out the time the voice is talking** (the greeting, the question, "Hear
+  it again", "Slowly"), so a child who listens first is timed like one who reads at once.
+  **A right answer nobody could time** (the iPad was put down, or more than a minute went by)
+  only counts as right: box, due day and "slow" all stay as they were.
+  Drills ask missed facts first, then due ones, then new ones.
+  A mixed round asks addition facts whose wait is over in place of fresh sums (one per round
+  within 100, every sum within 20), if Adding is switched on: missed and slow ones first, then
+  the others, lowest box first. A fact keeps coming back on its day, also once it is quick.
+- **Grown-ups' corner**: a "Math facts" panel with the count (practiced, quick, slow or missed),
+  the slow-facts list ("8 + 5 — missed last time · right 1 of 3", "7 + 6 — took 9 seconds"),
+  the speedy bests, and **Reset math facts** (two taps; stars, words and settings stay).
+  "Reset stars & progress" clears the fact memory too, and its panel says so.
+- **The old save is untouched.** `spellcaster-academy-v1` has the same fields in the same order;
+  opening the game writes nothing; nothing is migrated. A damaged fact memory is read as empty.
+
+### Tests added for it (`npm test -- math` runs these and the six `math fix` scenarios below)
+- `math facts` — the box rules with made-up clocks (growing waits, slow, helped, missed, a clock
+  set back), the order facts are asked in, damaged saves, speedy records, and every drill recipe.
+- `math helpers` — every kind of fact at the biggest and the smallest iPad size and the trickiest
+  ones at all six: the dots in each frame, the hops and little sums of each hint, that the hint
+  never shows the answer, that it is read aloud, that opening it moves nothing below the card,
+  reduced motion, hops arriving one by one, dots after a miss (same round and another day).
+- `math drills` — the menu, a round of each drill, the result cards, the fact memory after it,
+  Play again staying in the drill and asking the facts not asked yet.
+- `math speedy brew` — not offered at 8 of 9 quick, offered after the round that makes the 9th
+  quick, "Not now", the menu card, no timer on screen, a wrong answer (no card, no stars lost, no
+  retry), first record, new best, a slower run, leaving in the middle, and the menu and the offer
+  on the tight sizes.
+- `math slow facts` — the list as saved, after playing (with a clock the test can move), both
+  resets, four damaged fact memories, and a device that cannot save.
+- `math update keeps a save from before it` — a save written by the previous version, byte for
+  byte: nothing rewritten on opening, spelling at the saved steps, the new screens, then every
+  field compared.
+- Every older Potions scenario now goes through the menu (`startPotions` in the test file).
+
+## Math review (mathup/REVIEW-MATH.md) — all six findings fixed
+
+What was done and why is in `mathup/fixes-log.md`. Each finding has its own scenario
+(`npm test -- "math fix"` runs the six, about 70 seconds, 127 checks; `npm test -- "math fix 3"`
+runs one). Each scenario was also run against the code with its fix taken out, where it fails.
+
+1. **P2 a save that worked hid one that failed — fixed.** The game save and the fact memory are
+   watched apart; the grown-ups' notice stays until every failed one has been written.
+   *Test `math fix 1`:* the reviewer's steps (words refused, facts reset kept), and the other way round.
+2. **P2 speedy brews asked facts that were never quick — fixed.** Only facts that are quick right
+   now are asked; too few of them means practice first (see "Speedy brew" above).
+   *Test `math fix 2`:* 7, 4, 3 and 0 quick facts, with 8 + 5 answered once, slowly.
+3. **P2 an untimed answer wiped "slow" and put the fact off — fixed.** It now only counts as right.
+   *Test `math fix 3`:* a slow fact, a top-box fact an hour before its day, a save and reload, and
+   the iPad put down in the middle of two potions in the game.
+4. **P2 mixed rounds dropped a fact after one quick answer — fixed.** Every addition fact whose
+   wait is over is reviewed, the ones that need work first, with the same limit as before.
+   *Test `math fix 4`:* slow → quick → next day → quick → three days on, over five saved visits.
+5. **P2 the stopwatch counted the greeting and the question — fixed.** Talking time is left out,
+   with a longest length for each sentence in case the browser never reports its end.
+   *Test `math fix 5`:* a voice that takes 1.5 seconds a sentence: first and later potions get the
+   same time, an answer before the voice is done, Hear it again, Slowly, a voice that never
+   ends, no voice, a voice that fails.
+6. **P3 speedy potions were not counted as brewed — fixed.**
+   *Test `math fix 6`:* 5 of 8, a reload, 8 of 8, Play again, and leaving in the middle.
 
 ## Second review (REVIEW2.md) — remaining finding fixed
 
@@ -126,11 +235,38 @@ one). Every scenario was also run against the code from before the fix, where it
 - `npm test -- potions` runs only the Potions scenarios (about 3 minutes).
 
 ## Files
-- `public/potions.js` is **new**: math topics, problem generators and brew results as plain data and
-  pure functions. `CLAUDE.md`'s layout line does not list it yet.
+- `public/potions.js`: math topics, problem generators, the drills and their facts, and brew
+  results as plain data and pure functions. `CLAUDE.md`'s layout line does not list it yet.
+- `public/facts.js` is **new** (math fluency update): the fact memory as pure functions (boxes,
+  due times, the slow list, speedy records). It touches neither the page nor the storage;
+  `game.js` loads and saves it. Not in `CLAUDE.md`'s layout line either.
 - `public/game.js`, `index.html`, `style.css`, `scripts/test.mjs` extended.
 
 ## Known issues and limits
+- Math fluency update:
+  - "Quick" is 6 seconds from the potion appearing to the Brew tap, tile taps included, less the
+    time the voice was talking. That is a first guess for a seven-year-old on an iPad and has not
+    been tried with Mila; it is one number, `QUICK_MS` in `public/facts.js`.
+  - If Safari never reports the end of a sentence, the stopwatch allows a longest length for it
+    (1 second plus 130 ms a letter, at normal speed), which is generous: such an answer can look
+    up to about 2 seconds quicker than it was. Whether Safari reports the end reliably still
+    needs a look on the iPad.
+  - A right answer after more than a minute cannot be told from an iPad left lying, so it counts
+    as "not timed" and changes nothing; a fact that always takes that long is never listed as slow.
+  - With Adding as the only topic on the easy level, a round can be all reviews when eight facts
+    are due on the same day; fresh sums come in the next round.
+  - Only addition facts within 20 and the make-10 pairs are tracked. Taking away and story sums
+    are not, and have no dots or hint.
+  - 3 + 8 and 8 + 3 are two facts, on purpose (starting from the bigger number is the point), so
+    the slow list can show both.
+  - A speedy brew earns 3 stars every time it is played, also when played many times in a row.
+  - On the smallest upright iPad a round-complete card with the speedy offer and three or more
+    new rewards lets its two lists scroll; the buttons always stay in reach.
+  - A fact answered in a speedy brew counts for the fact memory like any other answer; a slow or
+    missed one goes back into practice and is left out of the next speedy brew (the speedy brew
+    itself stays).
+  - A speedy brew with four to seven quick facts asks some of them twice, so its best time is a
+    little easier to reach than with eight different ones.
 - **Not yet tried on a real iPad.** Tests run in headless Chromium with a stand-in for
   `speechSynthesis`; Safari's voice, tap feel and layout still need a look on the device.
 - A potion missed on one of the last three turns comes back sooner than three turns later, because
@@ -165,3 +301,9 @@ one). Every scenario was also run against the code from before the fix, where it
   availability) and added the `review 2 again` scenario; `npm test` passes, 2,207 checks.
   Not committed (as asked). Next: commit, push, third look by the reviewer if wanted.
 - Codex verified finding 2 fixed (REVIEW3.md). Code complete; awaiting Render dashboard Blueprint setup by Sonny.
+- 2026-10-12: Claude built the math fluency update (MATH-BRIEF.md) and its tests; notes and test
+  results in `mathup/build-notes.md`. Not committed (as asked). Next: independent review.
+- Codex math review done (`mathup/REVIEW-MATH.md`): six findings (five P2, one P3).
+- 2026-10-12: Claude fixed all six and added a scenario for each (`math fix 1` to `math fix 6`);
+  `npm test` passes, 3,899 checks in 33 scenarios. What was done and why: `mathup/fixes-log.md`.
+  Not committed (as asked). Next: commit, push, a try on the real iPad.

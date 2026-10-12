@@ -17,6 +17,12 @@
   --tile: clamp(60px, min(10vw, 10.5vh), 88px);
   --radius: 28px;
 
+  /* The two numbers of an addition fact: its dots, its hops and (while they show) its numerals. */
+  --dot-a: #ff6fb5;
+  --dot-a-deep: #d83e90;
+  --dot-b: #2ec4b6;
+  --dot-b-deep: #0f8f86;
+
   --font: ui-rounded, "SF Pro Rounded", "Arial Rounded MT Bold", "Nunito", "Baloo 2", "Fredoka",
     "Varela Round", "Quicksand", "Comic Sans MS", system-ui, -apple-system, "Segoe UI", sans-serif;
 }
@@ -631,6 +637,11 @@ textarea:focus-visible {
   animation: pop-in 0.5s cubic-bezier(0.2, 1.6, 0.4, 1) both;
 }
 
+/* A speedy potion that fizzled: done, in a soft color, never a cross. */
+.rp-star.is-tried {
+  color: rgba(255, 255, 255, 0.85);
+}
+
 .stage {
   display: flex;
   align-items: center;
@@ -1064,10 +1075,21 @@ textarea:focus-visible {
 .problem {
   --vis: clamp(150px, 22vh, 240px);
   display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  min-height: var(--vis);
+}
+
+.problem-art {
+  flex: 1 1 auto;
+  display: flex;
   align-items: center;
   justify-content: center;
   width: 100%;
-  min-height: var(--vis);
+  min-height: 0;
 }
 
 /* ---- sums: 27 + 15 = ? ---- */
@@ -1308,6 +1330,258 @@ textarea:focus-visible {
 .coin[data-cents="10"] { --d: 0.8; }
 .coin[data-cents="25"] { --d: 1.12; }
 
+/* ---- help with addition facts: ten-frame dots and a counting-on hint ---- */
+
+/* The helper is as tall as the room the sum leaves once it has shrunk, so the
+   card keeps its height and nothing below it moves when help is opened. */
+.helper {
+  --zone: clamp(66px, calc(var(--vis) - 126px), 84px);
+  --cell: calc((var(--zone) - 16px) / 2);
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  width: 100%;
+  height: var(--zone);
+}
+
+.problem.is-helping .problem-art {
+  flex: 0 0 auto;
+}
+
+.problem.is-helping .eq {
+  font-size: clamp(30px, 5vmin, 44px);
+}
+
+.problem.is-helping .eq-op {
+  color: var(--ink-soft);
+}
+
+.problem.is-helping .eq-num.eq-a {
+  color: var(--dot-a-deep);
+}
+
+.problem.is-helping .eq-num.eq-b {
+  color: var(--dot-b-deep);
+}
+
+.help-row {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: center;
+  gap: var(--gap);
+}
+
+.btn-help {
+  min-width: 124px;
+  min-height: 60px;
+  padding: 0 20px;
+  font-size: clamp(19px, 2.8vmin, 23px);
+  color: #1d6b5a;
+  background: linear-gradient(180deg, #e6fbf4, #c7f3e4);
+  box-shadow: 0 5px 0 #7fcdb4;
+}
+
+.btn-help:active:not(:disabled) {
+  box-shadow: 0 2px 0 #7fcdb4;
+}
+
+.btn-help.is-on {
+  color: #7a4a00;
+  background: linear-gradient(180deg, #fff3c4, #ffe08a);
+  box-shadow: 0 5px 0 var(--gold-deep);
+}
+
+/* A kind word during a speedy brew; it sits where the help buttons would be. */
+.brew-note {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 60px;
+  padding: 4px 18px;
+  border-radius: 18px;
+  background: #f4ebff;
+  font-size: clamp(19px, 2.9vmin, 24px);
+  line-height: 1.2;
+  color: var(--ink-soft);
+}
+
+.brew-note.is-almost {
+  background: #fff3c4;
+  color: #7a4a00;
+  font-weight: 900;
+}
+
+/* Ten-frames: five to a row, ten to a frame. */
+.frames {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(var(--cell) * 0.5);
+}
+
+.frame {
+  display: grid;
+  grid-template-columns: repeat(5, var(--cell));
+  grid-auto-rows: var(--cell);
+  gap: 2px;
+  padding: 3px;
+  border-radius: 9px;
+  background: #b99be6;
+}
+
+.cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  background: #fffdf7;
+}
+
+.dot {
+  width: 78%;
+  height: 78%;
+  border-radius: 50%;
+  border: 2px solid var(--dot-a-deep);
+  background: var(--dot-a);
+  animation: pop-in 0.3s cubic-bezier(0.2, 1.6, 0.4, 1) both;
+  animation-delay: calc(var(--i) * 30ms);
+}
+
+/* The second number is told apart by more than its color: its dots have a white heart. */
+.dot-b {
+  border-color: var(--dot-b-deep);
+  background: radial-gradient(circle, #fff 0 26%, var(--dot-b) 30%);
+}
+
+.dot-extra {
+  border-color: var(--gold-deep);
+  background: var(--gold);
+  box-shadow: 0 0 0 2px #fff3c4;
+}
+
+/* Counting on: a number to start from, then a hop for every dot. */
+.hint-caption {
+  font-size: clamp(15px, 2.5vmin, 19px);
+  font-weight: 800;
+  line-height: 1.15;
+  white-space: nowrap;
+  color: var(--ink-soft);
+}
+
+/* A hop is as big as the row allows, and smaller only when there are many of them (--n).
+   The percentage is of this row's width, so --hop is only used for the width of a hop. */
+.hops {
+  --hop: min(calc(var(--zone) - 38px), 38px, calc((100% - 100px) / var(--n, 10)));
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 3px;
+  width: 100%;
+}
+
+.hop-start {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: calc(var(--zone) - 26px);
+  height: calc(var(--zone) - 26px);
+  margin-right: 5px;
+  padding: 0 0.2em;
+  border-radius: 999px;
+  background: var(--dot-a-deep);
+  color: #fff;
+  font-size: calc(var(--zone) * 0.4);
+  font-weight: 900;
+  line-height: 1;
+}
+
+.hop-start.is-b {
+  background: var(--dot-b-deep);
+}
+
+.hop {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: var(--hop);
+  animation: hop-in 0.4s cubic-bezier(0.2, 1.5, 0.4, 1) both;
+  animation-delay: calc(0.35s + var(--i) * 0.45s);
+}
+
+/* The arc of a hop: it starts over the one before and lands on its own dot. */
+.hop-arc {
+  width: 100%;
+  height: 8px;
+  margin-left: -100%;
+  border: 3px solid var(--lilac-deep);
+  border-bottom: 0;
+  border-radius: 999px 999px 0 0;
+}
+
+/* The dot a hop lands on, with the number that is said there. */
+.hop-dot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  border: 3px solid var(--dot-a);
+  background: #ffe9f4;
+  color: var(--ink);
+  font-size: calc(var(--zone) * 0.24);
+  font-weight: 900;
+  line-height: 1;
+}
+
+.hop.is-b .hop-dot {
+  border-color: var(--dot-b);
+  background: #dff8f4;
+}
+
+.hop .hop-dot.is-blank {
+  border: 3px dashed var(--gold-deep);
+  background: #fff3c4;
+  color: #b36b00;
+}
+
+@keyframes hop-in {
+  from { opacity: 0; transform: translate(-70%, -30%) scale(0.6); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Two little sums, one after the other: 8 + 2 = 10, then 10 + 3 = ? */
+.steps {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(6px, 1.2vmin, 12px);
+}
+
+.step {
+  padding: 0.12em 0.5em;
+  border-radius: 12px;
+  background: #f1e8fb;
+  font-size: clamp(20px, 3.3vmin, 27px);
+  font-weight: 900;
+  line-height: 1.2;
+  white-space: nowrap;
+  color: #6a34c8;
+  animation: letter-in 0.4s cubic-bezier(0.2, 1.5, 0.4, 1) both;
+  animation-delay: calc(0.2s + var(--i) * 0.9s);
+}
+
+.step-arrow {
+  font-size: clamp(18px, 3vmin, 24px);
+  color: var(--pink-deep);
+}
+
 /* ---- number tiles: two rows of five when tall, one row of ten when wide ---- */
 
 .tiles-num {
@@ -1324,6 +1598,147 @@ textarea:focus-visible {
   line-height: 1;
   color: #fff;
   text-shadow: 0 3px 0 rgba(60, 20, 120, 0.45);
+}
+
+/* ------------------------------------------------------------------ potions menu */
+
+.menu-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-evenly;
+  gap: var(--gap);
+  text-align: center;
+}
+
+.menu-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.menu-hero .caster {
+  width: clamp(100px, min(22vw, 15vh), 190px);
+}
+
+.menu-hint {
+  font-size: clamp(22px, 3.6vmin, 30px);
+  color: #fff;
+  text-shadow: 0 2px 0 rgba(60, 20, 120, 0.45);
+}
+
+.potion-menu,
+.drill-list {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: calc(var(--gap) * 1.6);
+}
+
+.potion-menu {
+  width: min(560px, 100%);
+}
+
+/* A drill and, under it, its speedy brew. */
+.menu-drill {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.menu-card {
+  justify-content: flex-start;
+  gap: 18px;
+  width: 100%;
+  min-height: 108px;
+  padding: 10px 26px;
+  border-radius: 36px;
+  color: #fff;
+  text-align: left;
+  white-space: normal;
+  background: linear-gradient(180deg, #58dccb 0%, #1fb3a5 55%, #12948a 100%);
+  box-shadow: 0 8px 0 #0b6f68, 0 16px 26px rgba(20, 60, 110, 0.36), inset 0 3px 0 rgba(255, 255, 255, 0.5);
+  text-shadow: 0 2px 0 rgba(20, 30, 90, 0.4);
+}
+
+.menu-card:active:not(:disabled) {
+  box-shadow: 0 3px 0 #0b6f68, 0 6px 12px rgba(20, 60, 110, 0.36), inset 0 3px 0 rgba(255, 255, 255, 0.5);
+  transform: translateY(5px);
+}
+
+.menu-card-make10 {
+  background: linear-gradient(180deg, #ffb86b 0%, #ff8f3d 55%, #ee6f1f 100%);
+  box-shadow: 0 8px 0 #b94d0c, 0 16px 26px rgba(110, 40, 20, 0.36), inset 0 3px 0 rgba(255, 255, 255, 0.5);
+}
+
+.menu-card-make10:active:not(:disabled) {
+  box-shadow: 0 3px 0 #b94d0c, 0 6px 12px rgba(110, 40, 20, 0.36), inset 0 3px 0 rgba(255, 255, 255, 0.5);
+}
+
+.menu-card-doubles {
+  background: linear-gradient(180deg, #9db2ff 0%, #6c8cff 55%, #4c69e6 100%);
+  box-shadow: 0 8px 0 #2f47b4, 0 16px 26px rgba(20, 30, 110, 0.36), inset 0 3px 0 rgba(255, 255, 255, 0.5);
+}
+
+.menu-card-doubles:active:not(:disabled) {
+  box-shadow: 0 3px 0 #2f47b4, 0 6px 12px rgba(20, 30, 110, 0.36), inset 0 3px 0 rgba(255, 255, 255, 0.5);
+}
+
+.menu-icon {
+  flex: 0 0 auto;
+  font-size: clamp(42px, 6.6vmin, 58px);
+  line-height: 1;
+  text-shadow: none;
+}
+
+.menu-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.menu-name {
+  font-size: clamp(28px, 4.6vmin, 38px);
+  line-height: 1.1;
+}
+
+.menu-sub {
+  font-size: clamp(16px, 2.4vmin, 20px);
+  font-weight: 800;
+  line-height: 1.15;
+  text-shadow: none;
+  opacity: 0.96;
+}
+
+/* The speedy brew is the gold one, like the Brew button. */
+.menu-card.menu-speedy {
+  min-height: 68px;
+  padding: 6px 22px;
+  border-radius: 26px;
+  color: #5a2a00;
+  background: linear-gradient(180deg, #fff0a0 0%, #ffd34e 50%, #ffb52b 100%);
+  box-shadow: 0 6px 0 #d6860c, 0 12px 20px rgba(120, 60, 0, 0.3), inset 0 3px 0 rgba(255, 255, 255, 0.6);
+  text-shadow: none;
+}
+
+.menu-card.menu-speedy:active:not(:disabled) {
+  box-shadow: 0 2px 0 #d6860c, 0 5px 10px rgba(120, 60, 0, 0.3), inset 0 3px 0 rgba(255, 255, 255, 0.6);
+}
+
+.menu-speedy .menu-icon {
+  font-size: clamp(30px, 4.6vmin, 38px);
+}
+
+.menu-speedy .menu-name {
+  font-size: clamp(22px, 3.4vmin, 27px);
+}
+
+.menu-speedy .menu-sub {
+  font-size: clamp(15px, 2.2vmin, 18px);
 }
 
 /* ------------------------------------------------------------------ result card */
@@ -1663,6 +2078,32 @@ textarea:focus-visible {
   text-align: center;
 }
 
+/* On the round-complete card everything keeps its size except the lists in the
+   middle: on a small screen they scroll, so the buttons always stay in reach. */
+.panel-center > * {
+  flex: 0 0 auto;
+}
+
+.panel-center > .done-details {
+  flex: 0 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: clamp(8px, 1.6vh, 16px);
+  min-height: 110px;
+  max-width: 100%;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.done-details > * {
+  flex: 0 0 auto;
+}
+
+.done-details > :empty {
+  display: none;
+}
+
 .panel-title {
   font-size: clamp(34px, 6vmin, 52px);
   font-weight: 900;
@@ -1678,6 +2119,58 @@ textarea:focus-visible {
 
 .done-summary {
   font-size: clamp(22px, 3.6vmin, 30px);
+}
+
+/* After a speedy brew: the personal best. */
+.done-best {
+  padding: 6px 20px;
+  border-radius: 999px;
+  background: #fff1b8;
+  font-size: clamp(20px, 3.3vmin, 27px);
+  font-weight: 900;
+  color: #8a5a00;
+}
+
+/* After a drill: the offer of a speedy brew. Always optional. */
+.speedy-offer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px 16px;
+  padding: 10px 18px 14px;
+  border-radius: 24px;
+  border: 3px solid var(--gold);
+  background: #fffbe6;
+}
+
+.speedy-offer-text {
+  flex: 1 1 190px;
+  font-size: clamp(18px, 2.8vmin, 22px);
+  line-height: 1.25;
+}
+
+/* The first time it is offered there is more to say, so the words get a row of their own. */
+.speedy-offer.is-new .speedy-offer-text {
+  flex-basis: 100%;
+}
+
+/* With an offer on the card the trophy makes room. */
+.has-offer .done-trophy {
+  font-size: clamp(44px, 8vmin, 72px);
+}
+
+.speedy-offer-buttons {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.btn-offer {
+  min-width: 0;
+  min-height: 64px;
+  padding: 0 26px;
+  font-size: clamp(22px, 3.4vmin, 28px);
 }
 
 .done-words {
@@ -2095,6 +2588,40 @@ textarea:focus-visible {
   font-size: 22px;
 }
 
+.fact-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.fact-list:empty {
+  display: none;
+}
+
+.fact-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  border-radius: 14px;
+  background: #f3eef9;
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+.fact-name {
+  flex: 0 0 auto;
+  font-size: 22px;
+  font-weight: 900;
+}
+
+.fact-note {
+  text-align: right;
+  color: var(--ink-soft);
+}
+
 .noscript {
   position: fixed;
   inset: auto 0 0 0;
@@ -2135,6 +2662,27 @@ textarea:focus-visible {
   .home-actions {
     grid-column: 2;
     align-self: start;
+  }
+
+  /* Three cards side by side; each speedy brew sits under its drill. */
+  .potion-menu {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    align-items: start;
+    width: min(1060px, 100%);
+  }
+
+  .drill-list {
+    display: contents;
+  }
+
+  .menu-card:not(.menu-speedy) {
+    flex-direction: column;
+    justify-content: center;
+    gap: 6px;
+    min-height: 168px;
+    padding: 12px 14px;
+    text-align: center;
   }
 
   .tiles-alpha {

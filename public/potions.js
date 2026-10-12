@@ -1,4 +1,4 @@
-// Spellcaster Academy — potion recipes: 2nd-grade math problems and silly brew results.
+// Spellcaster Academy — potion recipes: 2nd-grade math problems, fact drills and silly brew results.
 // Plain data and pure functions only (nothing here touches the page); game.js does the brewing.
 window.SPELLCASTER_POTIONS = (() => {
   'use strict';
@@ -7,6 +7,7 @@ window.SPELLCASTER_POTIONS = (() => {
   const pick = (list) => list[Math.floor(Math.random() * list.length)];
   const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
   const total = (list) => list.reduce((sum, n) => sum + n, 0);
+  const range = (lo, hi) => Array.from({ length: hi - lo + 1 }, (_, i) => lo + i);
 
   function shuffle(list) {
     const a = list.slice();
@@ -38,6 +39,13 @@ window.SPELLCASTER_POTIONS = (() => {
     { id: 'story', name: 'Story problems', icon: '📖', color: '#a78bfa' },
     { id: 'time', name: 'Telling time', icon: '🕒', color: '#2ec4b6' },
     { id: 'coins', name: 'Coins', icon: '💰', color: '#ffd75e' },
+  ];
+
+  // Drills: one family of addition facts at a time, chosen from the Potions menu.
+  // They are not topics: a grown-up does not switch them on or off, and a mixed round never draws from them.
+  const drills = [
+    { id: 'make10', name: 'Make 10', icon: '🎯', color: '#ff9f43', teaser: 'What goes with 7?' },
+    { id: 'doubles', name: 'Doubles', icon: '🍒', color: '#6c8cff', teaser: '6 + 6, then 6 + 7' },
   ];
 
   // Short story problems, one sentence per line. Every number is 2 or more, so
@@ -72,12 +80,25 @@ window.SPELLCASTER_POTIONS = (() => {
   //   sayAnswer – read aloud when the potion fizzles
   //   label     – short text for the end-of-round list
   //   key       – two problems with the same key are the same problem
+  //   fact      – only on addition facts within 20 (see addFact), else null
   // ------------------------------------------------------------------
   function recipe(topic, key, fields) {
-    const problem = { topic, key: `${topic}:${key}`, format: 'number', unit: '', ...fields };
+    const problem = { topic, key: `${topic}:${key}`, format: 'number', unit: '', fact: null, ...fields };
     if (!problem.label) problem.label = problem.solved.join('');
     return problem;
   }
+
+  // An addition fact within 20 can be helped along with dots and a hint, and the
+  // game remembers how quickly it is answered:
+  //   key  – its name in the fact memory: "8+5", or "7+?=10" for a make-10 pair
+  //   a, b – the two numbers that are added
+  //   hint – the strategy the hint shows: 'count' (count on from the bigger number),
+  //          'ten' (hop up to 10), 'bridge' (make 10 first) or 'near' (a double and 1 more)
+  //   pair – true when each number gets a ten-frame of its own (doubles)
+  const FACT_MAX = 20;
+  const addFact = (a, b, hint = 'count', pair = false) => (
+    a >= 1 && b >= 1 && a + b <= FACT_MAX ? { key: `${a}+${b}`, a, b, hint, pair } : null
+  );
 
   const build = {
     add(a, b) {
@@ -88,6 +109,63 @@ window.SPELLCASTER_POTIONS = (() => {
         answer: String(a + b),
         solved: [`${a} + ${b} = `, String(a + b), ''],
         sayAnswer: `${a} plus ${b} is ${a + b}.`,
+        fact: addFact(a, b),
+      });
+    },
+
+    // Make 10: "7 + ? = 10"
+    makeTen(n) {
+      const rest = 10 - n;
+      return recipe('make10', `ten:${n}`, {
+        title: 'Make 10',
+        show: { type: 'equation', parts: [String(n), '+', '?', '=', '10'] },
+        say: `What goes with ${n} to make 10?`,
+        answer: String(rest),
+        solved: [`${n} + `, String(rest), ' = 10'],
+        sayAnswer: `${n} and ${rest} make 10.`,
+        fact: { key: `${n}+?=10`, a: n, b: rest, hint: 'ten', pair: false },
+      });
+    },
+
+    // Bridge through 10: 8 + 5 is 8 + 2 + 3
+    bridge(a, b) {
+      const fill = 10 - a;
+      return recipe('make10', `bridge:${a}+${b}`, {
+        title: 'Make 10 first',
+        show: { type: 'equation', parts: [String(a), '+', String(b), '=', '?'] },
+        say: `What is ${a} plus ${b}? Make 10 first.`,
+        answer: String(a + b),
+        solved: [`${a} + ${b} = ${a} + ${fill} + ${b - fill} = `, String(a + b), ''],
+        sayAnswer: `${a} plus ${b} is ${a + b}.`,
+        label: `${a} + ${b} = ${a + b}`,
+        fact: addFact(a, b, 'bridge'),
+      });
+    },
+
+    double(n) {
+      return recipe('doubles', `double:${n}`, {
+        title: 'Doubles',
+        show: { type: 'equation', parts: [String(n), '+', String(n), '=', '?'] },
+        say: `Double ${n}. What is ${n} plus ${n}?`,
+        answer: String(2 * n),
+        solved: [`${n} + ${n} = `, String(2 * n), ''],
+        sayAnswer: `${n} plus ${n} is ${2 * n}.`,
+        fact: addFact(n, n, 'count', true),
+      });
+    },
+
+    // Near doubles: 6 + 7 is 6 + 6 + 1
+    nearDouble(a, b) {
+      const small = Math.min(a, b);
+      return recipe('doubles', `near:${a}+${b}`, {
+        title: 'Double and 1 more',
+        show: { type: 'equation', parts: [String(a), '+', String(b), '=', '?'] },
+        say: `What is ${a} plus ${b}?`,
+        answer: String(a + b),
+        solved: [`${a} + ${b} = ${small} + ${small} + 1 = `, String(a + b), ''],
+        sayAnswer: `${a} plus ${b} is ${a + b}.`,
+        label: `${a} + ${b} = ${a + b}`,
+        fact: addFact(a, b, 'near', true),
       });
     },
 
@@ -302,15 +380,35 @@ window.SPELLCASTER_POTIONS = (() => {
     return (choose[topic] || choose.add)(levels.includes(level) ? level : 'hundred');
   }
 
+  // Every fact of a drill, as ready problems. A round asks `core` facts first,
+  // then `stretch` facts that build on them:
+  //   make10   what goes with 7 to make 10?  then  8 + 5 by way of 10 (bigger number first)
+  //   doubles  6 + 6                         then  6 + 7 and 7 + 6
+  function drillFacts(id) {
+    if (id === 'doubles') {
+      return {
+        core: range(1, 10).map((n) => build.double(n)),
+        stretch: range(2, 9).flatMap((n) => [build.nearDouble(n, n + 1), build.nearDouble(n + 1, n)]),
+      };
+    }
+    return {
+      core: range(1, 9).map((n) => build.makeTen(n)),
+      stretch: range(6, 9).flatMap((a) => range(11 - a, a - 1).map((b) => build.bridge(a, b))),
+    };
+  }
+
   // A round of `count` different problems, spread evenly over the topics that are switched on.
-  function makeRound(settings, count) {
+  // `review` lists addition facts as [a, b] that are due for another go: they take
+  // the place of fresh sums, so slow and missed facts come back more often.
+  function makeRound(settings, count, review = []) {
     let on = topics.map((topic) => topic.id).filter((id) => settings.topics && settings.topics[id]);
     if (!on.length) on = ['add'];
     let order = [];
     while (order.length < count) order = order.concat(shuffle(on));
+    const waiting = review.slice();
     const seen = new Set();
     return shuffle(order.slice(0, count)).map((topic) => {
-      let problem = makeProblem(topic, settings.level);
+      let problem = topic === 'add' && waiting.length ? build.add(...waiting.shift()) : makeProblem(topic, settings.level);
       for (let tries = 0; tries < 30 && seen.has(problem.key); tries++) problem = makeProblem(topic, settings.level);
       seen.add(problem.key);
       return problem;
@@ -356,5 +454,5 @@ window.SPELLCASTER_POTIONS = (() => {
     'Your cauldron is still warming up.',
   ];
 
-  return { levels, topics, stories, build, makeProblem, makeRound, brews, cheers, fizzles };
+  return { levels, topics, drills, stories, build, makeProblem, makeRound, drillFacts, brews, cheers, fizzles };
 })();

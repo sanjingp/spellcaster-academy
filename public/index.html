@@ -70,6 +70,37 @@
       </div>
     </section>
 
+    <!-- ===================== POTIONS MENU ===================== -->
+    <section id="screen-potions" class="screen" data-screen="potions" hidden>
+      <header class="topbar">
+        <button class="round-btn" type="button" data-go="home" aria-label="Back to home"><span aria-hidden="true">🏠</span></button>
+        <h2 class="topbar-title">Potions</h2>
+        <div class="star-count" aria-label="Stars collected">
+          <span aria-hidden="true">⭐</span><b data-stars>0</b>
+        </div>
+      </header>
+      <div class="menu-body">
+        <div class="menu-hero">
+          <div class="caster">
+            <div class="witch" data-witch></div>
+            <div class="familiar" data-familiar></div>
+          </div>
+          <p class="menu-hint">Which potion shall we brew?</p>
+        </div>
+        <div class="potion-menu">
+          <button id="btn-mix" class="btn menu-card menu-card-mix" type="button">
+            <span class="menu-icon" aria-hidden="true">🧪</span>
+            <span class="menu-text">
+              <span class="menu-name">Mixed potions</span>
+              <span class="menu-sub">A little bit of everything</span>
+            </span>
+          </button>
+          <!-- One card for each fact drill, and under it its speedy brew once that is earned (game.js). -->
+          <div id="drill-list" class="drill-list"></div>
+        </div>
+      </div>
+    </section>
+
     <!-- ===================== PLAY: SPELLS ===================== -->
     <section id="screen-play" class="screen play-screen" data-screen="play" data-step="1" hidden>
       <header class="topbar">
@@ -159,7 +190,16 @@
         <div class="prompt-card">
           <h2 class="prompt-title"><span id="brew-icon" aria-hidden="true"></span> <span id="brew-title"></span></h2>
           <div class="brew-body">
-            <div id="brew-problem" class="problem"></div>
+            <div id="brew-problem" class="problem">
+              <div id="brew-art" class="problem-art"></div>
+              <!-- Addition facts only: ten-frame dots or a counting-on hint, when asked for. -->
+              <div id="brew-helper" class="helper" hidden></div>
+              <div id="brew-help" class="help-row" hidden>
+                <button id="btn-dots" class="btn btn-help" type="button" aria-pressed="false"><span aria-hidden="true">🔵</span> Dots</button>
+                <button id="btn-hint" class="btn btn-help" type="button" aria-pressed="false"><span aria-hidden="true">💡</span> Hint</button>
+              </div>
+              <p id="brew-note" class="brew-note" role="status" aria-live="polite" hidden></p>
+            </div>
             <div id="brew-listen" class="listen-row">
               <button id="btn-brew-hear" class="btn btn-listen" type="button"><span aria-hidden="true">🔊</span> Hear it again</button>
               <button id="btn-brew-slow" class="btn btn-listen btn-listen-small" type="button"><span aria-hidden="true">🐢</span> Slowly</button>
@@ -204,8 +244,19 @@
           <div class="done-trophy" aria-hidden="true">🏆</div>
           <h2 id="done-title" class="panel-title">Spellbook complete!</h2>
           <p id="done-summary" class="done-summary"></p>
-          <ul id="done-words" class="done-words"></ul>
-          <div id="done-unlocks" class="unlock-list"></div>
+          <p id="done-best" class="done-best" hidden></p>
+          <!-- The lists give way (and scroll) before a button is pushed out of reach. -->
+          <div class="done-details">
+            <ul id="done-words" class="done-words"></ul>
+            <div id="done-unlocks" class="unlock-list"></div>
+          </div>
+          <div id="speedy-offer" class="speedy-offer" hidden>
+            <p id="speedy-offer-text" class="speedy-offer-text"></p>
+            <div class="speedy-offer-buttons">
+              <button id="btn-offer-go" class="btn btn-cast btn-offer" type="button"><span aria-hidden="true">⚡</span> Try it</button>
+              <button id="btn-offer-skip" class="btn btn-soft" type="button">Not now</button>
+            </div>
+          </div>
           <div class="panel-buttons">
             <button id="btn-again" class="btn btn-start btn-medium" type="button">Play again <span aria-hidden="true">✨</span></button>
             <button id="btn-done-wardrobe" class="btn btn-soft" type="button"><span aria-hidden="true">👗</span> My Witch</button>
@@ -316,6 +367,24 @@
         </div>
 
         <div class="panel">
+          <h3 class="pick-title">Math facts</h3>
+          <p id="facts-summary" class="parent-label"></p>
+          <ul id="slow-facts" class="fact-list" aria-label="Slow or missed facts"></ul>
+          <p id="slow-facts-note" class="parent-fine"></p>
+          <p id="facts-speedy" class="parent-fine"></p>
+          <p id="facts-message" class="parent-message" role="status" aria-live="polite"></p>
+          <div class="parent-buttons">
+            <button id="btn-reset-facts" class="btn btn-soft" type="button">Reset math facts</button>
+          </div>
+          <p class="parent-fine">
+            A fact is quick when it is answered right within about 6 seconds, without the dots or the hint.
+            The time the voice takes to read the question is not counted.
+            Slow and missed facts come back more often, also on later days. Once every fact of a drill is quick,
+            a speedy brew is offered: no countdown, nothing to lose, and it can always be skipped.
+          </p>
+        </div>
+
+        <div class="panel">
           <h3 class="pick-title">Sound</h3>
           <p id="voice-status" class="parent-fine"></p>
           <div class="parent-buttons">
@@ -331,6 +400,7 @@
             <button id="btn-reset" class="btn btn-soft" type="button">Reset stars &amp; progress</button>
           </div>
           <p class="parent-fine">
+            Resetting also clears the math facts. The word list and the settings stay.
             Everything is saved only on this device. No accounts, no ads, no tracking, and nothing is sent anywhere.
           </p>
         </div>
@@ -364,6 +434,7 @@
 
   <script src="words.js"></script>
   <script src="potions.js"></script>
+  <script src="facts.js"></script>
   <script src="game.js"></script>
 </body>
 </html>

@@ -1,11 +1,14 @@
 // Spellcaster Academy — every spelling word is a spell, every math problem is a potion.
-// Single plain script, no dependencies, no network. Data lives in words.js and potions.js.
+// Single plain script, no dependencies, no network. Data lives in words.js and potions.js;
+// facts.js remembers how well each addition fact is known.
 (() => {
   'use strict';
 
   const DATA = window.SPELLCASTER_DATA;
   const POTIONS = window.SPELLCASTER_POTIONS;
+  const FACTS = window.SPELLCASTER_FACTS;
   const STORE_KEY = 'spellcaster-academy-v1';
+  const FACTS_KEY = 'spellcaster-academy-facts-v1'; // fact memory has a key of its own; the save above is left as it was
 
   const MIN_LEN = 2;
   const MAX_LEN = 12;
@@ -17,12 +20,19 @@
 
   const POTIONS_PER_ROUND = 8;
   const MAX_DIGITS = 3; // potion answers go up to 100
+  const SPEEDY_STARS = 3; // for joining in a speedy brew, however it goes
+  const SPEEDY_MIN = 4;   // a speedy brew needs this many different facts that are quick right now
+  const SPEEDY_NOTE = 'No rush. This one is just for fun!';
 
   const WORD_RATE = 0.85;
   const SLOW_RATE = 0.55;
   const PROBLEM_SLOW_RATE = 0.65; // a whole sentence, so not quite as slow as one word
   const PEEK_MS = 2600;
   const RETRY_GAP = 3; // a missed spell or potion comes back after this many others
+  // The longest a sentence is taken to last when the browser never says it is done:
+  // a moment to start, and a generous while for every letter (at normal speed).
+  const TALK_LEAD_MS = 1000;
+  const TALK_MS_PER_LETTER = 130;
 
   const STEP_TITLES = {
     1: 'Copy the spell',
@@ -125,7 +135,12 @@
     }
   }
 
-  let storageOk = storageWorks(); // false while saving does not work; grown-ups are told
+  // Grown-ups are told for as long as something is not saved. The game save and the
+  // fact memory are written apart, so each is watched on its own: one that was
+  // kept must not hide the other that was not.
+  let storageDown = !storageWorks(); // nothing could be kept when the game opened, and nothing has been since
+  const unsaved = new Set();         // the keys whose last write failed
+  const savingWorks = () => !storageDown && unsaved.size === 0;
 
   function loadState() {
     const state = freshState();
@@ -175,22 +190,40 @@
   }
 
   // Returns true only if the save really was written.
-  function saveState() {
+  function keep(key, value) {
     let ok = true;
     try {
-      window.localStorage.setItem(STORE_KEY, JSON.stringify(state));
+      window.localStorage.setItem(key, JSON.stringify(value));
     } catch (err) {
       // Storage may be full or blocked; the game still works for this visit.
       ok = false;
     }
-    if (ok !== storageOk) {
-      storageOk = ok;
-      renderSaveNote();
+    const before = savingWorks();
+    if (ok) {
+      unsaved.delete(key);
+      storageDown = false;
+    } else {
+      unsaved.add(key);
     }
+    if (savingWorks() !== before) renderSaveNote();
     return ok;
   }
 
+  const saveState = () => keep(STORE_KEY, state);
+
+  // Fact memory: which addition facts are quick, slow or missed, and the best speedy brews.
+  function loadFacts() {
+    try {
+      return FACTS.clean(JSON.parse(window.localStorage.getItem(FACTS_KEY) || 'null'));
+    } catch (err) {
+      return FACTS.fresh(); // private browsing or a damaged save: just start fresh
+    }
+  }
+
+  const saveFacts = () => keep(FACTS_KEY, factStore);
+
   let state = loadState();
+  let factStore = loadFacts();
 
   function progressFor(word) {
     if (!Object.prototype.hasOwnProperty.call(state.progress, word)) {
@@ -236,6 +269,11 @@
     voice: null,
     live: new Set(), // what is being said now; also keeps it alive (Safari drops it mid-word otherwise)
     checkTimer: 0,
+    // How long the voice has been busy: the potion stopwatch leaves that time out
+    // (see thinkingTime), so listening to the question is not counted as thinking.
+    talkMs: 0,    // every finished stretch of talking, added up
+    talkFrom: 0,  // when the voice got busy; 0 while it is quiet
+    talkUntil: 0, // when it must be done at the latest, should the browser never say so
 
     // Both in one word, for the screens: 'missing', 'novoices', 'failed'
     // (there is a voice, but its last try did not work) or 'ok'.
@@ -303,9 +341,37 @@
       this.checkTimer = setTimeout(() => this.checkVoices(), 1200);
     },
 
+    // All the time spent talking up to `now` (a time from performance.now()).
+    talked(now) {
+      return this.talkMs + (this.talkFrom ? Math.max(0, Math.min(now, this.talkUntil) - this.talkFrom) : 0);
+    },
+
+    // One more thing to say. Its longest likely length is allowed for, so a browser
+    // that never reports the end cannot stop the stopwatch for good.
+    talkMore(text, rate) {
+      const now = performance.now();
+      if (this.talkFrom && now > this.talkUntil) this.talkDone(); // the last one never said it was done
+      if (!this.talkFrom) this.talkFrom = this.talkUntil = now;
+      this.talkUntil += (TALK_LEAD_MS + TALK_MS_PER_LETTER * text.length) / rate;
+    },
+
+    // Nothing left to say.
+    talkDone() {
+      this.talkMs = this.talked(performance.now());
+      this.talkFrom = 0;
+    },
+
+    // Takes one finished (or failed) utterance off the list. False if it was not on it any more.
+    finish(utter) {
+      if (!this.live.delete(utter)) return false;
+      if (!this.live.size) this.talkDone();
+      return true;
+    },
+
     // Stops whatever is being said. The "error" that follows is our own doing, not a broken voice.
     cancel() {
       this.live.clear();
+      this.talkDone();
       window.speechSynthesis.cancel();
     },
 
@@ -330,9 +396,9 @@
         utter.onstart = () => {
           if (this.live.has(utter)) this.set({ failed: false }); // it really spoke
         };
-        utter.onend = () => this.live.delete(utter);
+        utter.onend = () => this.finish(utter);
         utter.onerror = (event) => {
-          if (!this.live.delete(utter)) return; // we stopped it ourselves
+          if (!this.finish(utter)) return; // we stopped it ourselves
           const reason = event && event.error;
           if (reason === 'canceled' || reason === 'interrupted') return; // cut short, not broken
           this.set({ failed: true });
@@ -340,6 +406,7 @@
         this.live.add(utter);
         if (synth.paused) synth.resume();
         synth.speak(utter);
+        this.talkMore(text, rate);
         return true;
       } catch (err) {
         this.set({ available: 'missing' });
@@ -546,6 +613,7 @@
     for (const screen of screens) screen.hidden = screen.dataset.screen !== name;
     document.body.dataset.screen = name;
     if (name === 'home') renderHome();
+    if (name === 'potions') renderPotionMenu();
     if (name === 'wardrobe') renderWardrobe();
     if (name === 'book') renderBook();
     if (name === 'parent') {
@@ -603,7 +671,9 @@
   // ------------------------------------------------------------------
   // Spells: a round of spelling
   // ------------------------------------------------------------------
-  let session = null; // { mode: 'spells' | 'potions', items, queue, earned, unlocks }
+  // { mode: 'spells' | 'potions', items, queue, earned, unlocks }, and for potions also
+  // { kind: 'mixed' or a drill id, speedy, right, ms } (the last two add up a speedy brew)
+  let session = null;
   let turn = null;    // the word on screen right now
   let outcomeBag = [];
 
@@ -716,9 +786,10 @@
     const box = $(potions ? '#brew-progress' : '#round-progress');
     box.textContent = '';
     for (const item of session.items) {
-      box.append(el('span', item.done ? 'rp-star is-done' : 'rp-star', '★'));
+      // A speedy potion that fizzled is done too, but it earns no gold star.
+      box.append(el('span', !item.done ? 'rp-star' : item.stars ? 'rp-star is-done' : 'rp-star is-tried', '★'));
     }
-    const done = session.items.filter((i) => i.done).length;
+    const done = session.items.filter((i) => i.done && i.stars).length;
     box.setAttribute('aria-label', potions
       ? `${done} of ${plural(session.items.length, 'potion')} brewed this round`
       : `${done} of ${plural(session.items.length, 'spell')} mastered this round`);
@@ -1112,13 +1183,18 @@
     turn = null;
     brew = null;
     const potions = session.mode === 'potions';
+    const speedy = potions && session.speedy ? finishSpeedy() : null; // adds its stars before they are counted below
     const earned = session.earned;
     const count = session.items.length;
-    const title = potions ? 'All potions brewed!' : 'Spellbook complete!';
-    $('#done-title').textContent = title;
-    $('#done-summary').textContent = potions
+    const title = speedy ? 'Speedy brew done!' : potions ? 'All potions brewed!' : 'Spellbook complete!';
+    const summary = speedy ? speedy.summary : potions
       ? `You brewed ${plural(count, 'potion')} and earned ${plural(earned, 'star')}!`
       : `You mastered ${plural(count, 'spell')} and earned ${plural(earned, 'star')}!`;
+    $('#done-title').textContent = title;
+    $('#done-summary').textContent = summary;
+    $('#done-best').textContent = speedy ? speedy.best : '';
+    $('#done-best').hidden = !speedy;
+    renderSpeedyOffer(potions && !session.speedy ? session.kind : null);
     const list = $('#done-words');
     list.textContent = '';
     for (const item of session.items) {
@@ -1136,30 +1212,90 @@
     const trophy = centerOf($('.done-trophy'));
     burst(trophy.x, trophy.y, ['⭐', '✨', '🌟', '💖', '💜'], 22, 260);
     chimes.mastered();
-    speech.say(`${title} You earned ${plural(earned, 'star')}!`, { rate: 0.95, pitch: 1.2 });
+    speech.say(speedy ? `${title} ${speedy.say}` : `${title} You earned ${plural(earned, 'star')}!`, { rate: 0.95, pitch: 1.2 });
   }
 
   // ------------------------------------------------------------------
   // Potions: a round of math. Every problem is a potion to brew.
   // ------------------------------------------------------------------
-  let brew = null; // the potion in the cauldron right now: { item, problem, placed, busy }
+  // The potion in the cauldron right now: { item, problem, placed, busy }, and to
+  // time it and help with it: { startedAt, talkedBefore, away, view: null | 'dots' | 'hint', helped }
+  let brew = null;
   let brewBag = [];
 
   const brewScreen = $('#screen-brew');
   const brewSlots = $('#brew-slots');
   const brewTiles = $('#brew-tiles');
   const problemBox = $('#brew-problem');
+  const artBox = $('#brew-art');
+  const helperBox = $('#brew-helper');
+  const noteBox = $('#brew-note');
   const brewUndoBtn = $('#btn-brew-undo');
   const brewBtn = $('#btn-brew');
 
-  function startBrewRound() {
-    const items = POTIONS.makeRound(state.math, POTIONS_PER_ROUND).map((problem) => ({
+  // Every drill with all its facts, as ready problems: { id, name, icon, color, teaser, core, stretch }.
+  const DRILLS = POTIONS.drills.map((drill) => ({ ...drill, ...POTIONS.drillFacts(drill.id) }));
+  const drillOf = (id) => DRILLS.find((drill) => drill.id === id) || null;
+  const factKey = (problem) => problem.fact.key;
+
+  // Addition facts that are due for another go take the place of fresh sums in
+  // a mixed round. Within 100 that is one potion; within 20 every sum is a fact anyway.
+  function reviewFacts(now) {
+    if (!state.math.topics.add) return [];
+    return FACTS.review(factStore, now, state.math.level === 'easy' ? POTIONS_PER_ROUND : 1);
+  }
+
+  // A drill round: core facts first, then the ones that build on them. The better
+  // the core is known, the more room the others get. Whatever needs practice most comes first.
+  function drillProblems(drill, now) {
+    const quick = FACTS.quickCount(factStore, drill.core.map(factKey));
+    const coreCount = quick < drill.core.length / 2 ? 6 : quick < drill.core.length ? 4 : 2;
+    const choose = (list, count) => {
+      const keys = FACTS.rank(factStore, list.map(factKey), now).slice(0, count);
+      return shuffle(keys).map((key) => list.find((problem) => factKey(problem) === key));
+    };
+    return choose(drill.core, coreCount).concat(choose(drill.stretch, POTIONS_PER_ROUND - coreCount));
+  }
+
+  // A speedy brew asks only facts that are quick right now, the best known first:
+  // never one that is still being learned or that slipped, since Dots and Hint are
+  // put away here. With fewer than a round of them some come twice, but never
+  // twice in a row.
+  function speedyProblems(drill) {
+    const pool = shuffle(drill.core.concat(drill.stretch).filter((problem) => FACTS.isQuick(factStore, factKey(problem))))
+      .sort((x, y) => FACTS.boxOf(factStore, factKey(y)) - FACTS.boxOf(factStore, factKey(x)))
+      .slice(0, POTIONS_PER_ROUND);
+    let round = shuffle(pool);
+    while (pool.length && round.length < POTIONS_PER_ROUND) {
+      const more = shuffle(pool);
+      if (more[0] === round[round.length - 1]) more.push(more.shift());
+      round = round.concat(more);
+    }
+    return round.slice(0, POTIONS_PER_ROUND);
+  }
+
+  // A speedy brew stays earned for good (see unlockSpeedyBrews), but it is only
+  // played while enough of its drill's facts are quick. When too many have
+  // slipped, its button starts a round of practice instead, with Dots and Hint.
+  const speedyReady = (drill) =>
+    FACTS.quickCount(factStore, drill.core.concat(drill.stretch).map(factKey)) >= SPEEDY_MIN;
+
+  // `kind` is 'mixed' or a drill id; `speedy` turns a drill into its speedy brew.
+  function startBrewRound(kind = 'mixed', speedy = false) {
+    const drill = drillOf(kind);
+    const problems = !drill
+      ? POTIONS.makeRound(state.math, POTIONS_PER_ROUND, reviewFacts(Date.now()))
+      : speedy ? speedyProblems(drill) : drillProblems(drill, Date.now());
+    const items = problems.map((problem) => ({
       problem,
       misses: 0,
       done: false,
       stars: 0,
     }));
-    session = { mode: 'potions', items, queue: items.slice(), earned: 0, unlocks: [] };
+    session = {
+      mode: 'potions', kind: drill ? drill.id : 'mixed', speedy: !!drill && speedy,
+      items, queue: items.slice(), earned: 0, unlocks: [], right: 0, ms: 0,
+    };
     hideResult();
     show('brew');
     renderRoundProgress();
@@ -1172,9 +1308,27 @@
       return;
     }
     const item = session.queue.shift();
-    brew = { item, problem: item.problem, placed: [], busy: false };
+    brew = { item, problem: item.problem, placed: [], busy: false, startedAt: 0, talkedBefore: 0, away: false, view: null, helped: false };
+    // A fact that fizzled last time comes back with its dots already showing.
+    const fact = item.problem.fact;
+    const saved = fact ? FACTS.get(factStore, fact.key) : null;
+    if (fact && !session.speedy && (item.misses > 0 || (saved && saved.miss))) {
+      brew.view = 'dots';
+      brew.helped = true;
+    }
     renderBrew();
-    sayProblem(speechOptions);
+    brew.startedAt = performance.now();
+    brew.talkedBefore = speech.talked(brew.startedAt);
+    if (!session.speedy) sayProblem(speechOptions); // a speedy brew does not wait to be read out
+  }
+
+  // How long the potion on screen has been thought about: the time since it
+  // appeared, less the time the voice was talking (the greeting, the question,
+  // "Hear it again"). A child who listens first is timed like one who reads at once,
+  // and an answer given before the voice is done is simply a very quick one.
+  function thinkingTime() {
+    const now = performance.now();
+    return Math.max(1, now - brew.startedAt - (speech.talked(now) - brew.talkedBefore));
   }
 
   // A clock answer has a box for every digit (3:30); other answers are typed freely.
@@ -1216,6 +1370,9 @@
         const kind = part === '?' ? 'eq-blank' : /^\d/.test(part) ? 'eq-num' : 'eq-op';
         row.append(el('span', kind, part));
       }
+      // The two numbers that are added get the colors of their dots (see tenFrames).
+      row.children[0].classList.add('eq-a');
+      row.children[2].classList.add('eq-b');
       return row;
     },
 
@@ -1286,17 +1443,161 @@
     $('#brew-listen').hidden = !speech.canTry;
   }
 
+  // ---------- help with addition facts: the dots and a hint ----------
+  // Ten-frames: five dots to a row, ten to a frame, one color for each number.
+  // The second number carries on where the first one stops, so a full frame shows
+  // the ten. Doubles get a frame each instead, and a make-10 pair shows only what
+  // is there: the empty places are the answer.
+  function tenFrames(fact) {
+    const { a, b } = fact;
+    const single = fact.hint === 'ten';
+    const second = fact.pair ? 10 : a; // where the second number's dots begin
+    const dots = Array(single ? 10 : 20).fill('');
+    dots.fill('dot-a', 0, a);
+    if (!single) dots.fill('dot-b', second, second + b);
+    if (fact.hint === 'near') dots[a > b ? a - 1 : 9 + b] = 'dot-extra'; // the "1 more" of a near double
+    const box = el('div', 'frames');
+    for (let at = 0; at < dots.length; at += 10) {
+      const frame = el('div', 'frame');
+      dots.slice(at, at + 10).forEach((kind, i) => {
+        const cell = el('span', 'cell');
+        if (kind) {
+          const dot = el('span', `dot ${kind}`);
+          dot.style.setProperty('--i', String(at + i));
+          cell.append(dot);
+        }
+        frame.append(cell);
+      });
+      box.append(frame);
+    }
+    box.setAttribute('role', 'img');
+    box.setAttribute('aria-label', single
+      ? `A ten-frame with ${plural(a, 'dot')}. The other places are empty.`
+      : `Ten-frames with ${plural(a, 'dot')} and ${plural(b, 'dot')}.`);
+    return box;
+  }
+
+  // Counting on: the number to start from, then one hop for every dot that is added.
+  function hopRow(start, startKind, labels, hopKind) {
+    const row = el('div', 'hops');
+    row.style.setProperty('--n', String(labels.length));
+    row.append(el('span', `hop-start is-${startKind}`, String(start)));
+    labels.forEach((label, i) => {
+      const hop = el('span', `hop is-${hopKind}`);
+      hop.style.setProperty('--i', String(i));
+      hop.append(el('span', 'hop-arc'), el('span', label === '?' ? 'hop-dot is-blank' : 'hop-dot', String(label)));
+      row.append(hop);
+    });
+    return row;
+  }
+
+  // Two little sums, one after the other: 8 + 2 = 10, then 10 + 3 = ?
+  function stepRow(steps) {
+    const row = el('div', 'steps');
+    steps.forEach((text, i) => {
+      if (i) row.append(el('span', 'step-arrow', '➜'));
+      const step = el('span', 'step', text);
+      step.style.setProperty('--i', String(i));
+      row.append(step);
+    });
+    return row;
+  }
+
+  // One hint for each strategy a recipe can ask for (`fact.hint`). The last step
+  // is always left for the child: a hint shows the way, not the answer.
+  const hints = {
+    // Start from the bigger number, then hop on the smaller one dot by dot.
+    count({ a, b }) {
+      const big = Math.max(a, b);
+      const small = Math.min(a, b);
+      const labels = Array.from({ length: small }, (_, i) => (i === small - 1 ? '?' : big + i + 1));
+      const start = a === b ? `Start from ${big}` : 'Start from the bigger number';
+      return {
+        caption: `${start}, then hop!`,
+        say: `${a === b ? start : `${start}, ${big}`}. Then count on ${small} more.`,
+        row: hopRow(big, b > a ? 'b' : 'a', labels, b > a ? 'a' : 'b'),
+      };
+    },
+
+    // 7 + ? = 10: hop from 7 up to 10 and count the hops.
+    ten({ a, b }) {
+      return {
+        caption: `Hop from ${a} up to 10. How many hops?`,
+        say: `Start at ${a} and hop up to 10. How many hops is that?`,
+        row: hopRow(a, 'a', Array.from({ length: b }, (_, i) => a + i + 1), 'b'),
+      };
+    },
+
+    // 8 + 5 = 8 + 2 + 3: make 10 first, then add what is left.
+    bridge({ a, b }) {
+      const fill = 10 - a;
+      return {
+        caption: `Make 10 first! ${b} is ${fill} and ${b - fill}.`,
+        say: `Make 10 first. ${a} plus ${fill} makes 10. Then add ${b - fill} more.`,
+        row: stepRow([`${a} + ${fill} = 10`, `10 + ${b - fill} = ?`]),
+      };
+    },
+
+    // 6 + 7 = 6 + 6 + 1: a double, and one more.
+    near({ a, b }) {
+      const small = Math.min(a, b);
+      return {
+        caption: `Use a double! ${small + 1} is ${small} and 1 more.`,
+        say: `Use a double. ${small} plus ${small} is ${2 * small}. Then add 1 more.`,
+        row: stepRow([`${small} + ${small} = ${2 * small}`, `${2 * small} + 1 = ?`]),
+      };
+    },
+  };
+
+  // The help row belongs to addition facts only, and a speedy brew has a kind
+  // word in its place. Whatever is open (dots or hint) sits under the sum.
+  function renderHelper() {
+    const fact = brew.problem.fact;
+    const canHelp = !!fact && !session.speedy;
+    const view = canHelp ? brew.view : null;
+    $('#brew-help').hidden = !canHelp;
+    noteBox.hidden = !session.speedy;
+    helperBox.hidden = !view;
+    helperBox.textContent = '';
+    helperBox.dataset.view = view || '';
+    problemBox.classList.toggle('is-helping', !!view);
+    for (const [name, btn] of [['dots', $('#btn-dots')], ['hint', $('#btn-hint')]]) {
+      btn.classList.toggle('is-on', view === name);
+      btn.setAttribute('aria-pressed', String(view === name));
+      btn.disabled = brew.busy;
+    }
+    if (view === 'dots') helperBox.append(tenFrames(fact));
+    if (view === 'hint') {
+      const hint = hints[fact.hint](fact);
+      helperBox.append(el('p', 'hint-caption', hint.caption), hint.row);
+    }
+  }
+
+  // Tapping a help button shows its picture; tapping it again puts it away.
+  function toggleHelp(view) {
+    if (!brew || brew.busy || !brew.problem.fact || session.speedy) return;
+    brew.view = brew.view === view ? null : view;
+    if (brew.view) brew.helped = true; // an answer with help is not a quick one (see facts.js)
+    chimes.tap();
+    renderHelper();
+    if (brew.view === 'hint') speech.say(hints[brew.problem.fact.hint](brew.problem.fact).say, { rate: WORD_RATE, pitch: 1.05 });
+  }
+
   function renderBrew() {
     const { problem } = brew;
-    const topic = POTIONS.topics.find((t) => t.id === problem.topic);
+    const topic = POTIONS.topics.find((t) => t.id === problem.topic) || drillOf(problem.topic);
     brewScreen.dataset.topic = problem.topic;
+    brewScreen.dataset.mode = session.speedy ? 'speedy' : session.kind === 'mixed' ? 'mixed' : 'drill';
     brewScreen.classList.remove('is-casting-ok', 'is-casting-fizzle');
     brewScreen.style.setProperty('--potion', topic.color);
-    $('#brew-icon').textContent = topic.icon;
+    $('#brew-icon').textContent = session.speedy ? '⚡' : topic.icon;
     $('#brew-title').textContent = problem.title;
-    problemBox.textContent = '';
+    artBox.textContent = '';
     problemBox.dataset.show = problem.show.type;
-    problemBox.append(problemArt[problem.show.type](problem.show));
+    artBox.append(problemArt[problem.show.type](problem.show));
+    noteBox.textContent = SPEEDY_NOTE;
+    noteBox.classList.remove('is-almost');
+    renderHelper();
     renderBrewListenRow();
     refreshBrewBoard(false);
   }
@@ -1345,6 +1646,8 @@
     const ready = brewReady() && !brew.busy;
     brewBtn.disabled = !ready;
     brewBtn.classList.toggle('is-ready', ready);
+    $('#btn-dots').disabled = brew.busy;
+    $('#btn-hint').disabled = brew.busy;
   }
 
   // ---------- brewing the potion ----------
@@ -1375,15 +1678,74 @@
     if (!brew || brew.busy || !brewReady()) return;
     const thisBrew = brew;
     const ok = brewIsRight();
+    const ms = thinkingTime();
     brew.busy = true;
     refreshBrewBoard(false);
-    const info = settleBrew(ok);
-
+    rememberFact(ok, ms);
     const cauldron = $('#cauldron');
     castEffects(brewScreen, ok, { sparkle: cauldron, slots: brewSlots, smoke: cauldron });
+    if (session.speedy) {
+      speedyBrew(ok, ms);
+      return;
+    }
+    const info = settleBrew(ok);
     setTimeout(() => {
       if (brew === thisBrew && activeScreen === 'brew') showBrewResult(info);
     }, calm() ? 150 : 950);
+  }
+
+  // An addition fact goes into the fact memory: right or not, how long it took,
+  // and whether the dots or the hint were showing.
+  function rememberFact(ok, ms) {
+    const fact = brew.problem.fact;
+    if (!fact) return;
+    // If the iPad was put down in the middle, nobody knows how long the thinking took.
+    FACTS.record(factStore, fact.key, { ok, ms: brew.away ? NaN : ms, helped: brew.helped }, Date.now());
+    saveFacts();
+  }
+
+  // A speedy brew never stops for a result card. Right or not, the next potion
+  // comes along: nothing is taken away and nothing has to be done again.
+  function speedyBrew(ok, ms) {
+    const thisBrew = brew;
+    const { item, problem } = brew;
+    item.done = true;
+    item.stars = ok ? 1 : 0; // only to light its star: speedy stars are given at the end
+    session.right += ok ? 1 : 0;
+    session.ms += Math.min(ms, FACTS.AWAY_MS);
+    renderRoundProgress();
+    if (!ok) {
+      noteBox.textContent = `Almost! ${problem.solved.join('')}`;
+      noteBox.classList.add('is-almost');
+      speech.say(problem.sayAnswer, { rate: 0.95 });
+    }
+    setTimeout(() => {
+      if (brew === thisBrew && activeScreen === 'brew') nextBrew();
+    }, ok ? (calm() ? 150 : 650) : 2400);
+  }
+
+  // The end of a speedy brew: a few stars for joining in, and a cheer for a personal best.
+  function finishSpeedy() {
+    const run = { right: session.right, total: session.items.length, ms: Math.max(1, Math.round(session.ms)) };
+    const before = state.stars;
+    state.stars += SPEEDY_STARS;
+    session.earned += SPEEDY_STARS;
+    session.unlocks.push(...newUnlocks(before, state.stars));
+    state.math.brewed += run.right; // counted here, so a speedy brew left in the middle changes nothing
+    const { best, previous } = FACTS.saveRun(factStore, session.kind, run);
+    saveState();
+    saveFacts();
+    const brewed = run.right
+      ? `You brewed ${run.right} of ${plural(run.total, 'speedy potion')} in ${took(run.ms)}`
+      : `You tried ${plural(run.total, 'speedy potion')}, and every try makes your magic stronger`;
+    const record = !best
+      ? `Your best is ${previous.right} of ${previous.total} in ${took(previous.ms)}. Maybe next time!`
+      : previous ? '🏆 New personal best!' : '🏆 That is your first record!';
+    return {
+      summary: `${brewed}, and earned ${plural(SPEEDY_STARS, 'star')}!`,
+      best: record,
+      say: `${brewed}. ${best ? (previous ? 'New personal best!' : 'That is your first record!') : ''}`,
+    };
   }
 
   // Works out what the brew means for the queue and the stars.
@@ -1459,6 +1821,83 @@
       speech.say(`${cheer} ${scene.say}`, { rate: 0.95, pitch: 1.2 });
     }
     openResultCard();
+  }
+
+  // ------------------------------------------------------------------
+  // Potions menu: mixed potions, the fact drills and, once earned, their speedy brews
+  // ------------------------------------------------------------------
+  const drillList = $('#drill-list');
+  const took = (ms) => plural(Math.max(1, Math.round(ms / 1000)), 'second');
+
+  // A speedy brew is offered once every core fact of its drill is quick. After
+  // that it stays: a later slip never takes it away again.
+  // Returns the drills whose speedy brew is new.
+  function unlockSpeedyBrews() {
+    const fresh = DRILLS.filter((drill) => !FACTS.isUnlocked(factStore, drill.id) &&
+      drill.core.every((problem) => FACTS.isQuick(factStore, factKey(problem))));
+    for (const drill of fresh) FACTS.unlock(factStore, drill.id);
+    if (fresh.length) saveFacts();
+    return fresh.map((drill) => drill.id);
+  }
+
+  function menuCard(className, icon, name) {
+    const btn = el('button', `btn menu-card ${className}`);
+    btn.type = 'button';
+    const art = el('span', 'menu-icon', icon);
+    art.setAttribute('aria-hidden', 'true');
+    const text = el('span', 'menu-text');
+    text.append(el('span', 'menu-name', name), el('span', 'menu-sub'));
+    btn.append(art, text);
+    return btn;
+  }
+
+  function renderPotionMenu() {
+    unlockSpeedyBrews();
+    if (!drillList.children.length) {
+      for (const drill of DRILLS) {
+        const group = el('div', 'menu-drill');
+        const card = menuCard(`menu-card-${drill.id}`, drill.icon, drill.name);
+        card.id = `btn-drill-${drill.id}`;
+        card.dataset.drill = drill.id;
+        const speedy = menuCard('menu-speedy', '⚡', 'Speedy brew');
+        speedy.id = `btn-speedy-${drill.id}`;
+        speedy.dataset.speedy = drill.id;
+        group.append(card, speedy);
+        drillList.append(group);
+      }
+    }
+    for (const drill of DRILLS) {
+      const keys = drill.core.map(factKey);
+      const started = drill.core.concat(drill.stretch).some((problem) => FACTS.get(factStore, factKey(problem)));
+      const quick = FACTS.quickCount(factStore, keys);
+      $(`#btn-drill-${drill.id} .menu-sub`).textContent = !started ? drill.teaser
+        : quick === keys.length ? 'All quick! ⭐' : quick ? `${quick} of ${keys.length} quick` : 'Warming up…';
+      const speedy = FACTS.speedOf(factStore, drill.id);
+      const btn = $(`#btn-speedy-${drill.id}`);
+      const best = !speedyReady(drill) ? 'A little practice first 💜'
+        : speedy && speedy.best ? `Best: ${speedy.best.right} of ${speedy.best.total} in ${took(speedy.best.ms)}` : 'Just for fun!';
+      btn.hidden = !(speedy && speedy.unlocked);
+      btn.setAttribute('aria-label', `Speedy brew of ${drill.name}. ${best}`); // two drills, two speedy brews: say which
+      $('.menu-sub', btn).textContent = best;
+    }
+  }
+
+  // After a drill round: a gentle offer of the speedy brew, if it has been earned.
+  // It never has to be taken: "Not now" puts it away, and so does every other button.
+  let offeredDrill = null;
+
+  function renderSpeedyOffer(kind) {
+    const fresh = unlockSpeedyBrews();
+    const drill = kind ? drillOf(kind) : null;
+    offeredDrill = drill && FACTS.isUnlocked(factStore, drill.id) && speedyReady(drill) ? drill : null;
+    const isNew = !!offeredDrill && fresh.includes(drill.id);
+    $('#speedy-offer').hidden = !offeredDrill;
+    $('#speedy-offer').classList.toggle('is-new', isNew);
+    $('#screen-done .panel').classList.toggle('has-offer', !!offeredDrill);
+    if (!offeredDrill) return;
+    $('#speedy-offer-text').textContent = isNew
+      ? `⚡ New! You know ${drill.name} so well that a speedy brew is ready. No rush, it is just for fun!`
+      : '⚡ A speedy brew? Just for fun!';
   }
 
   // ------------------------------------------------------------------
@@ -1621,15 +2060,67 @@
     renderParentMath(`${topic.name}: ${state.math.topics[id] ? 'on' : 'off'}.`);
   }
 
-  // Shown for as long as the browser refuses to keep the save.
+  // "8+5" -> "8 + 5", "7+?=10" -> "7 + ? = 10"
+  const factLabel = (key) => key.replace(/([+=])/g, ' $1 ');
+  let factsResetArmed = 0;
+
+  // The slow-facts list: every fact that was slow, needed help or was missed last time.
+  function renderParentFacts(message = '') {
+    const { practiced, quick, slow } = FACTS.summary(factStore);
+    $('#facts-summary').textContent = practiced
+      ? `${plural(practiced, 'fact')} practiced · ${quick} quick · ${slow} slow or missed.`
+      : 'No facts practiced yet. They are collected from Make 10, Doubles and adding within 20.';
+    const rows = FACTS.slowList(factStore);
+    const list = $('#slow-facts');
+    list.textContent = '';
+    const why = (row) => (row.why === 'missed' ? 'missed last time'
+      : row.why === 'helped' ? 'needed the dots or the hint' : `took ${took(row.ms)}`);
+    for (const row of rows.slice(0, 12)) {
+      const item = el('li', 'fact-row');
+      item.dataset.fact = row.key;
+      item.dataset.why = row.why;
+      item.append(el('span', 'fact-name', factLabel(row.key)), el('span', 'fact-note', `${why(row)} · right ${row.right} of ${row.seen}`));
+      list.append(item);
+    }
+    $('#slow-facts-note').textContent = !practiced ? ''
+      : !rows.length ? 'No slow facts right now. 🎉'
+        : rows.length > 12 ? `… and ${rows.length - 12} more. These come back first.`
+          : 'These come back more often until they are quick.';
+    const speedy = DRILLS.map((drill) => {
+      const saved = FACTS.speedOf(factStore, drill.id);
+      if (!saved || !saved.unlocked) return `${drill.name}: ${FACTS.quickCount(factStore, drill.core.map(factKey))} of ${drill.core.length} facts quick`;
+      return saved.best
+        ? `${drill.name}: speedy brew best ${saved.best.right} of ${saved.best.total} in ${took(saved.best.ms)}`
+        : `${drill.name}: speedy brew ready`;
+    });
+    $('#facts-speedy').textContent = `${speedy.join(' · ')}.`;
+    $('#facts-message').textContent = message;
+    factsResetArmed = 0;
+    $('#btn-reset-facts').textContent = 'Reset math facts';
+  }
+
+  // Clears the fact memory and the speedy bests. Stars, words and settings stay.
+  function resetFacts() {
+    if (Date.now() - factsResetArmed > 4000) {
+      factsResetArmed = Date.now();
+      $('#btn-reset-facts').textContent = 'Tap again to forget the facts';
+      return;
+    }
+    factStore = FACTS.fresh();
+    const kept = saveFacts();
+    renderParentFacts(kept ? 'Math facts were reset. Stars and words are untouched.' : 'Math facts were reset for this visit only.');
+  }
+
+  // Shown for as long as the browser refuses to keep the save or the fact memory.
   function renderSaveNote() {
-    $('#save-note').hidden = storageOk;
+    $('#save-note').hidden = savingWorks();
   }
 
   function renderParent() {
     wordInput.value = state.words.join('\n');
     renderParentWords();
     renderParentMath();
+    renderParentFacts();
     for (const btn of $$('#round-size .seg-btn')) {
       const chosen = Number(btn.dataset.size) === state.roundSize;
       btn.classList.toggle('is-chosen', chosen);
@@ -1684,7 +2175,9 @@
     state.stars = 0;
     state.robe = DATA.robes[0].id;
     state.familiar = DATA.familiars[0].id;
+    factStore = FACTS.fresh(); // fact memory and speedy bests are progress too
     saveState();
+    saveFacts();
     renderCasters();
     renderStars();
     renderParent();
@@ -1717,14 +2210,28 @@
   // ------------------------------------------------------------------
   // Wiring
   // ------------------------------------------------------------------
-  function begin(mode) {
+  // `kind` and `speedy` choose the potion round: mixed, a drill, or a drill's speedy brew.
+  function begin(mode, kind = 'mixed', speedy = false) {
     // This runs inside the tap, which is what lets Safari speak and chime.
     const potions = mode === 'potions';
+    const drill = potions ? drillOf(kind) : null;
+    // A speedy brew whose facts have slipped is a round of practice first.
+    const practice = speedy && !(drill && speedyReady(drill));
     chimes.unlock();
-    speech.say(potions ? 'Let’s brew some potions!' : 'Let’s cast some spells!', { rate: 0.95, pitch: 1.2 });
+    speech.say(!potions ? 'Let’s cast some spells!'
+      : practice ? 'Let’s warm up with a little practice first!'
+        : speedy ? 'Speedy brew! No rush, just have fun!' : 'Let’s brew some potions!', { rate: 0.95, pitch: 1.2 });
     speech.scheduleCheck();
-    if (potions) startBrewRound();
+    if (potions) startBrewRound(kind, speedy && !practice);
     else startRound();
+  }
+
+  // The Potions button opens the potion menu. Its tap also wakes the voice and the chimes.
+  function openPotionMenu() {
+    chimes.unlock();
+    speech.say('Which potion shall we brew?', { rate: 0.95, pitch: 1.2 });
+    speech.scheduleCheck();
+    show('potions');
   }
 
   function quitRound() {
@@ -1734,8 +2241,20 @@
   }
 
   $('#btn-spells').addEventListener('click', () => begin('spells'));
-  $('#btn-potions').addEventListener('click', () => begin('potions'));
-  $('#btn-again').addEventListener('click', () => begin(session ? session.mode : 'spells'));
+  $('#btn-potions').addEventListener('click', openPotionMenu);
+  $('#btn-mix').addEventListener('click', () => begin('potions'));
+  drillList.addEventListener('click', (event) => {
+    const btn = event.target.closest('.menu-card');
+    if (btn) begin('potions', btn.dataset.drill || btn.dataset.speedy, !!btn.dataset.speedy);
+  });
+  $('#btn-again').addEventListener('click', () => {
+    if (session) begin(session.mode, session.kind, session.speedy);
+    else begin('spells');
+  });
+  $('#btn-offer-go').addEventListener('click', () => {
+    if (offeredDrill) begin('potions', offeredDrill.id, true);
+  });
+  $('#btn-offer-skip').addEventListener('click', () => renderSpeedyOffer(null));
   $('#btn-wardrobe').addEventListener('click', () => show('wardrobe'));
   $('#btn-done-wardrobe').addEventListener('click', () => show('wardrobe'));
   $('#btn-book').addEventListener('click', () => show('book'));
@@ -1763,6 +2282,8 @@
   brewBtn.addEventListener('click', brewPotion);
   $('#btn-brew-hear').addEventListener('click', () => sayProblem());
   $('#btn-brew-slow').addEventListener('click', () => sayProblem({ slow: true }));
+  $('#btn-dots').addEventListener('click', () => toggleHelp('dots'));
+  $('#btn-hint').addEventListener('click', () => toggleHelp('hint'));
 
   $('#robe-picks').addEventListener('click', onPick);
   $('#familiar-picks').addEventListener('click', onPick);
@@ -1775,6 +2296,7 @@
   $('#btn-save-words').addEventListener('click', saveWords);
   $('#btn-starter').addEventListener('click', useStarter);
   $('#btn-reset').addEventListener('click', resetProgress);
+  $('#btn-reset-facts').addEventListener('click', resetFacts);
   $('#btn-test-voice').addEventListener('click', () => {
     speech.say('Hello! I will read the spelling words.', { pitch: 1.05 });
     speech.scheduleCheck();
@@ -1805,7 +2327,9 @@
   // Keep iPad Safari from pinch-zooming while little fingers tap fast.
   document.addEventListener('gesturestart', (event) => event.preventDefault());
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) speech.hush();
+    if (!document.hidden) return;
+    speech.hush();
+    if (brew) brew.away = true; // this potion's time no longer says how well the fact is known
   });
   window.addEventListener('resize', fitModel); // turning the iPad changes the card's width
 
