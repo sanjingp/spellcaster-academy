@@ -307,3 +307,9 @@ one). Every scenario was also run against the code from before the fix, where it
 - 2026-10-12: Claude fixed all six and added a scenario for each (`math fix 1` to `math fix 6`);
   `npm test` passes, 3,899 checks in 33 scenarios. What was done and why: `mathup/fixes-log.md`.
   Not committed (as asked). Next: commit, push, a try on the real iPad.
+
+## 2026-10-14: Take-Home 6.2 words + Build It
+- `words.js` → `thisWeek` (top of file): this week's list, a sentence per word, and Build It pairs. Changing `thisWeek.id` loads the new list once on every device (sets "Practice this week only" ON; old words/stars kept).
+- Spells reads the context sentence after the word.
+- New `build.html` (Build It): base word → -ing word with drop-the-e hints, decoy "e" tile, hope vs hop round, stars in localStorage.
+- `scripts/gen-grok-voice.mjs`: pre-generates xAI Grok TTS MP3s (needs XAI_API_KEY). Not yet wired into the game.

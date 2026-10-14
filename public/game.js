@@ -115,6 +115,7 @@
       custom: false,
       week: [],         // this week's words (a subset of words)
       weekOnly: false,  // practise only this week's words
+      weekApplied: '',  // which DATA.thisWeek list was loaded already
       roundSize: 5, // 0 means "all words"
       progress: Object.create(null), // word -> { step, mastered, best, last }; no prototype, so any word is a safe key
       math: freshMath(),
@@ -143,6 +144,19 @@
   let storageDown = !storageWorks(); // nothing could be kept when the game opened, and nothing has been since
   const unsaved = new Set();         // the keys whose last write failed
   const savingWorks = () => !storageDown && unsaved.size === 0;
+
+  // Load the list in words.js (DATA.thisWeek) once per new id, on every device.
+  function applyThisWeek(state) {
+    const tw = DATA.thisWeek;
+    if (!tw || !Array.isArray(tw.words) || state.weekApplied === tw.id) return;
+    const { words } = sanitizeWords(tw.words.join(' '));
+    if (!words.length) return;
+    for (const w of words) if (!state.words.includes(w)) state.words.push(w);
+    state.custom = true;
+    state.week = words;
+    state.weekOnly = true;
+    state.weekApplied = tw.id;
+  }
 
   function loadState() {
     const state = freshState();
@@ -189,10 +203,12 @@
         if (robe && robe.cost <= state.stars) state.robe = robe.id;
         const familiar = DATA.familiars.find((f) => f.id === saved.familiar);
         if (familiar && familiar.cost <= state.stars) state.familiar = familiar.id;
+        if (typeof saved.weekApplied === 'string') state.weekApplied = saved.weekApplied;
       }
     } catch (err) {
       // Private browsing or a damaged save: just start fresh.
     }
+    applyThisWeek(state);
     return state;
   }
 
@@ -952,6 +968,8 @@
   function sayWord({ slow = false, queue = false } = {}) {
     if (!turn) return;
     speech.say(turn.word, { rate: slow ? SLOW_RATE : WORD_RATE, pitch: 1.05, queue });
+    const sentence = DATA.thisWeek && DATA.thisWeek.sentences && DATA.thisWeek.sentences[turn.word];
+    if (sentence && !slow) speech.say(sentence, { rate: WORD_RATE, pitch: 1.05, queue: true });
   }
 
   // Without a voice, flash the word briefly: look, cover, spell.
