@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Build It · Spellcaster Academy</title>
+<link rel="stylesheet" href="build.css">
+</head>
+<body>
+<main class="wrap">
+  <header><a class="back" href="./">⬅ Home</a><span id="stars">⭐ 0</span></header>
+  <h1>🔨 Build It!</h1>
+  <p id="rule" class="rule">Drop the <b>e</b>, then add <b>ing</b>.</p>
+  <div id="card" class="card">
+    <p class="label">Start with</p>
+    <div id="base" class="base"></div>
+    <button id="hear" class="btn soft" type="button">🔊 Hear it</button>
+    <p class="label">Make it</p>
+    <div id="slots" class="slots"></div>
+    <div id="tiles" class="tiles"></div>
+    <div class="row">
+      <button id="undo" class="btn soft" type="button">⌫ Undo</button>
+      <button id="hint" class="btn soft" type="button">💡 Hint</button>
+      <button id="check" class="btn go" type="button">✨ Check</button>
+    </div>
+    <p id="msg" class="msg" aria-live="polite"></p>
+  </div>
+  <div id="done" class="card" hidden>
+    <h2>🎉 All built!</h2>
+    <p id="donemsg"></p>
+    <button id="again" class="btn go" type="button">Play again</button>
+  </div>
+</main>
+<script src="words.js"></script>
+<script src="build.js"></script>
+</body>
+</html>

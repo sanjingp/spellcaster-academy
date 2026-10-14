@@ -1,0 +1,24 @@
+*{box-sizing:border-box}
+body{margin:0;font-family:"Avenir Next","Trebuchet MS",system-ui,sans-serif;background:linear-gradient(160deg,#f3e8ff,#ffe4f1);color:#3b2266;min-height:100vh}
+.wrap{max-width:760px;margin:0 auto;padding:16px}
+header{display:flex;justify-content:space-between;font-size:22px;font-weight:700}
+.back{color:#6b3fc4;text-decoration:none}
+h1{text-align:center;color:#6b3fc4;margin:8px 0}
+.rule{text-align:center;font-size:22px;margin:4px 0 12px}
+.card{background:#fff;border-radius:24px;padding:18px;box-shadow:0 6px 20px #6b3fc433;text-align:center}
+.label{margin:6px 0;font-size:18px;color:#8a6bbf}
+.base{font-size:48px;font-weight:800;letter-spacing:4px;margin-bottom:6px}
+.base .e{color:#ff6fb5;text-decoration:line-through}
+.slots{display:flex;justify-content:center;flex-wrap:wrap;gap:6px;min-height:70px;margin:8px 0}
+.slot{width:52px;height:64px;border-bottom:4px solid #c9b3f0;font-size:40px;font-weight:800;line-height:64px}
+.tiles{display:flex;justify-content:center;flex-wrap:wrap;gap:10px;margin:14px 0}
+.tile,.btn{touch-action:manipulation;user-select:none;-webkit-user-select:none;border:0;cursor:pointer;font-family:inherit}
+.tile{min-width:64px;height:64px;border-radius:16px;font-size:34px;font-weight:800;background:#ffd75e;color:#3b2266;box-shadow:0 4px 0 #e0a92a}
+.tile:disabled{opacity:.3}
+.row{display:flex;justify-content:center;gap:10px;flex-wrap:wrap}
+.btn{min-height:60px;padding:0 22px;border-radius:30px;font-size:22px;font-weight:700}
+.soft{background:#efe4ff;color:#6b3fc4}
+.go{background:#8f5cf0;color:#fff}
+.msg{min-height:30px;font-size:22px;margin:12px 0 0}
+.good{color:#1a9c6a}.try{color:#c0457f}
+@media (prefers-reduced-motion:no-preference){.pop{animation:pop .5s}@keyframes pop{50%{transform:scale(1.15)}}}

@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Spellcaster">
+  <meta name="theme-color" content="#6b3fc4">
+  <meta name="format-detection" content="telephone=no">
+  <meta name="robots" content="noindex">
+  <title>Spellcaster Academy</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%238f5cf0'/%3E%3Cpath d='M32 11l5.6 14.3 15.3.9-11.9 9.7 3.9 14.9L32 42.5l-12.9 8.3 3.9-14.9-11.9-9.7 15.3-.9z' fill='%23ffd75e'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Night-sky decorations (pure CSS) -->
+  <div class="sky" aria-hidden="true">
+    <div class="sky-stars sky-stars-a"></div>
+    <div class="sky-stars sky-stars-b"></div>
+    <div class="sky-moon"></div>
+    <div class="sky-hills"></div>
+  </div>
+
+  <main id="app">
+    <!-- ===================== HOME ===================== -->
+    <section id="screen-home" class="screen" data-screen="home">
+      <header class="topbar">
+        <button id="btn-parent" class="hold-btn" type="button" aria-label="Grown-ups: press and hold for two seconds">
+          <span class="hold-fill" aria-hidden="true"></span>
+          <span class="hold-label"><span aria-hidden="true">🔒</span> Grown-ups <small>press &amp; hold</small></span>
+        </button>
+        <div class="star-count" aria-label="Stars collected">
+          <span aria-hidden="true">⭐</span><b data-stars>0</b>
+        </div>
+      </header>
+
+      <div class="home-body">
+        <div class="home-title">
+          <h1 class="logo">
+            <span class="logo-top">Spellcaster</span>
+            <span class="logo-bottom">Academy</span>
+          </h1>
+          <p class="tagline">Words are spells. Numbers are potions!</p>
+        </div>
+        <div class="home-hero">
+          <div class="caster caster-big">
+            <div class="witch" data-witch></div>
+            <div class="familiar" data-familiar></div>
+          </div>
+        </div>
+        <div class="home-actions">
+          <div class="mode-buttons">
+            <button id="btn-spells" class="btn btn-mode btn-mode-spells" type="button">
+              <span class="mode-name"><span aria-hidden="true">✨</span> Spells</span>
+              <span id="spells-status" class="mode-sub"></span>
+            </button>
+            <button id="btn-potions" class="btn btn-mode btn-mode-potions" type="button">
+              <span class="mode-name"><span aria-hidden="true">🧪</span> Potions</span>
+              <span id="potions-status" class="mode-sub"></span>
+            </button>
+          </div>
+          <div class="home-links">
+            <button id="btn-wardrobe" class="btn btn-soft" type="button"><span aria-hidden="true">👗</span> My Witch</button>
+            <button id="btn-book" class="btn btn-soft" type="button"><span aria-hidden="true">📖</span> Spellbook</button>
+            <a id="btn-build" class="btn btn-soft" href="build.html"><span aria-hidden="true">🔨</span> Build It</a>
+          </div>
+          <p class="speech-note" data-speech-note="home" hidden></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== POTIONS MENU ===================== -->
+    <section id="screen-potions" class="screen" data-screen="potions" hidden>
+      <header class="topbar">
+        <button class="round-btn" type="button" data-go="home" aria-label="Back to home"><span aria-hidden="true">🏠</span></button>
+        <h2 class="topbar-title">Potions</h2>
+        <div class="star-count" aria-label="Stars collected">
+          <span aria-hidden="true">⭐</span><b data-stars>0</b>
+        </div>
+      </header>
+      <div class="menu-body">
+        <div class="menu-hero">
+          <div class="caster">
+            <div class="witch" data-witch></div>
+            <div class="familiar" data-familiar></div>
+          </div>
+          <p class="menu-hint">Which potion shall we brew?</p>
+        </div>
+        <div class="potion-menu">
+          <button id="btn-mix" class="btn menu-card menu-card-mix" type="button">
+            <span class="menu-icon" aria-hidden="true">🧪</span>
+            <span class="menu-text">
+              <span class="menu-name">Mixed potions</span>
+              <span class="menu-sub">A little bit of everything</span>
+            </span>
+          </button>
+          <!-- One card for each fact drill, and under it its speedy brew once that is earned (game.js). -->
+          <div id="drill-list" class="drill-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== PLAY: SPELLS ===================== -->
+    <section id="screen-play" class="screen play-screen" data-screen="play" data-step="1" hidden>
+      <header class="topbar">
+        <button id="btn-quit" class="round-btn" type="button" aria-label="Back to home">
+          <span aria-hidden="true">🏠</span>
+        </button>
+        <div id="round-progress" class="round-progress" role="img" aria-label="Spells mastered this round"></div>
+        <div class="star-count" aria-label="Stars collected">
+          <span aria-hidden="true">⭐</span><b data-stars>0</b>
+        </div>
+      </header>
+
+      <div class="stage">
+        <div class="caster">
+          <div class="witch" data-witch></div>
+          <div class="familiar" data-familiar></div>
+        </div>
+
+        <div class="prompt-card">
+          <ol id="ladder" class="ladder" aria-label="Spell power">
+            <li data-pip="1"><span class="pip-icon" aria-hidden="true">👀</span><span class="pip-name">Copy</span></li>
+            <li data-pip="2"><span class="pip-icon" aria-hidden="true">🧩</span><span class="pip-name">Fill in</span></li>
+            <li data-pip="3"><span class="pip-icon" aria-hidden="true">🌀</span><span class="pip-name">Unmix</span></li>
+            <li data-pip="4"><span class="pip-icon" aria-hidden="true">👂</span><span class="pip-name">Listen</span></li>
+          </ol>
+          <h2 id="prompt-title" class="prompt-title">Copy the spell</h2>
+          <div id="model" class="model" aria-live="polite"></div>
+          <div id="listen-row" class="listen-row">
+            <button id="btn-hear" class="btn btn-listen" type="button"><span aria-hidden="true">🔊</span> Hear it again</button>
+            <button id="btn-slow" class="btn btn-listen btn-listen-small" type="button"><span aria-hidden="true">🐢</span> Slowly</button>
+            <button id="btn-peek" class="btn btn-listen" type="button" hidden><span aria-hidden="true">👀</span> <span id="peek-label">Peek at the spell</span></button>
+          </div>
+          <p class="speech-note" data-speech-note="spells" hidden></p>
+        </div>
+      </div>
+
+      <div id="slots" class="slots" role="group" aria-label="Your spelling"></div>
+      <div id="tiles" class="tiles" role="group" aria-label="Letter tiles"></div>
+
+      <div class="actions">
+        <button id="btn-undo" class="tile tile-undo" type="button" aria-label="Undo the last letter" disabled>
+          <svg viewBox="0 0 48 48" aria-hidden="true">
+            <path d="M20 10 8 21l12 11" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M9 21h17a12 12 0 0 1 0 24h-7" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" transform="translate(0 -6)"/>
+          </svg>
+          <span class="undo-word">Undo</span>
+        </button>
+        <button id="btn-cast" class="btn btn-cast" type="button" disabled>
+          <span aria-hidden="true">✨</span> Cast spell! <span aria-hidden="true">✨</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- ===================== PLAY: POTIONS (math) ===================== -->
+    <section id="screen-brew" class="screen play-screen" data-screen="brew" hidden>
+      <header class="topbar">
+        <button id="btn-brew-quit" class="round-btn" type="button" aria-label="Back to home">
+          <span aria-hidden="true">🏠</span>
+        </button>
+        <div id="brew-progress" class="round-progress" role="img" aria-label="Potions brewed this round"></div>
+        <div class="star-count" aria-label="Stars collected">
+          <span aria-hidden="true">⭐</span><b data-stars>0</b>
+        </div>
+      </header>
+
+      <div class="stage">
+        <div class="caster caster-brew">
+          <div class="witch" data-witch></div>
+          <div class="familiar" data-familiar></div>
+          <div id="cauldron" class="cauldron" aria-hidden="true">
+            <svg class="cauldron-svg" viewBox="0 0 120 118">
+              <circle class="bubble bubble-a" cx="40" cy="30" r="8"/>
+              <circle class="bubble bubble-b" cx="64" cy="20" r="6"/>
+              <circle class="bubble bubble-c" cx="84" cy="32" r="7"/>
+              <ellipse cx="34" cy="110" rx="9" ry="6" fill="#2a1650"/>
+              <ellipse cx="86" cy="110" rx="9" ry="6" fill="#2a1650"/>
+              <path d="M12 52c-8 30 10 58 48 58s56-28 48-58z" fill="#4a2a80"/>
+              <path d="M22 66c-2 14 4 26 14 33" fill="none" stroke="#fff" stroke-opacity=".28" stroke-width="5" stroke-linecap="round"/>
+              <ellipse cx="60" cy="52" rx="54" ry="14" fill="#33195e"/>
+              <ellipse class="cauldron-brew" cx="60" cy="52" rx="44" ry="9"/>
+              <ellipse cx="46" cy="50" rx="12" ry="3" fill="#fff" fill-opacity=".45"/>
+              <path d="M60 73l3 6.9 7.5.7-5.7 5 1.7 7.3-6.5-3.8-6.5 3.8 1.7-7.3-5.7-5 7.5-.7z" fill="#ffd75e"/>
+            </svg>
+          </div>
+        </div>
+
+        <div class="prompt-card">
+          <h2 class="prompt-title"><span id="brew-icon" aria-hidden="true"></span> <span id="brew-title"></span></h2>
+          <div class="brew-body">
+            <div id="brew-problem" class="problem">
+              <div id="brew-art" class="problem-art"></div>
+              <!-- Addition facts only: ten-frame dots or a counting-on hint, when asked for. -->
+              <div id="brew-helper" class="helper" hidden></div>
+              <div id="brew-help" class="help-row" hidden>
+                <button id="btn-dots" class="btn btn-help" type="button" aria-pressed="false"><span aria-hidden="true">🔵</span> Dots</button>
+                <button id="btn-hint" class="btn btn-help" type="button" aria-pressed="false"><span aria-hidden="true">💡</span> Hint</button>
+              </div>
+              <p id="brew-note" class="brew-note" role="status" aria-live="polite" hidden></p>
+            </div>
+            <div id="brew-listen" class="listen-row">
+              <button id="btn-brew-hear" class="btn btn-listen" type="button"><span aria-hidden="true">🔊</span> Hear it again</button>
+              <button id="btn-brew-slow" class="btn btn-listen btn-listen-small" type="button"><span aria-hidden="true">🐢</span> Slowly</button>
+            </div>
+            <p class="speech-note" data-speech-note="potions" hidden></p>
+          </div>
+        </div>
+      </div>
+
+      <div id="brew-slots" class="slots" role="group" aria-label="Your answer"></div>
+      <div id="brew-tiles" class="tiles tiles-num" role="group" aria-label="Number tiles">
+        <button class="tile" type="button" data-digit="1" aria-label="number 1">1</button>
+        <button class="tile" type="button" data-digit="2" aria-label="number 2">2</button>
+        <button class="tile" type="button" data-digit="3" aria-label="number 3">3</button>
+        <button class="tile" type="button" data-digit="4" aria-label="number 4">4</button>
+        <button class="tile" type="button" data-digit="5" aria-label="number 5">5</button>
+        <button class="tile" type="button" data-digit="6" aria-label="number 6">6</button>
+        <button class="tile" type="button" data-digit="7" aria-label="number 7">7</button>
+        <button class="tile" type="button" data-digit="8" aria-label="number 8">8</button>
+        <button class="tile" type="button" data-digit="9" aria-label="number 9">9</button>
+        <button class="tile" type="button" data-digit="0" aria-label="number 0">0</button>
+      </div>
+
+      <div class="actions">
+        <button id="btn-brew-undo" class="tile tile-undo" type="button" aria-label="Erase the last number" disabled>
+          <svg viewBox="0 0 48 48" aria-hidden="true">
+            <path d="M20 10 8 21l12 11" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M9 21h17a12 12 0 0 1 0 24h-7" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" transform="translate(0 -6)"/>
+          </svg>
+          <span class="undo-word">Undo</span>
+        </button>
+        <button id="btn-brew" class="btn btn-cast" type="button" disabled>
+          <span aria-hidden="true">🧪</span> Brew potion! <span aria-hidden="true">🧪</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- ===================== ROUND COMPLETE ===================== -->
+    <section id="screen-done" class="screen" data-screen="done" hidden>
+      <div class="panel-wrap">
+        <div class="panel panel-center">
+          <div class="done-trophy" aria-hidden="true">🏆</div>
+          <h2 id="done-title" class="panel-title">Spellbook complete!</h2>
+          <p id="done-summary" class="done-summary"></p>
+          <p id="done-best" class="done-best" hidden></p>
+          <!-- The lists give way (and scroll) before a button is pushed out of reach. -->
+          <div class="done-details">
+            <ul id="done-words" class="done-words"></ul>
+            <div id="done-unlocks" class="unlock-list"></div>
+          </div>
+          <div id="speedy-offer" class="speedy-offer" hidden>
+            <p id="speedy-offer-text" class="speedy-offer-text"></p>
+            <div class="speedy-offer-buttons">
+              <button id="btn-offer-go" class="btn btn-cast btn-offer" type="button"><span aria-hidden="true">⚡</span> Try it</button>
+              <button id="btn-offer-skip" class="btn btn-soft" type="button">Not now</button>
+            </div>
+          </div>
+          <div class="panel-buttons">
+            <button id="btn-again" class="btn btn-start btn-medium" type="button">Play again <span aria-hidden="true">✨</span></button>
+            <button id="btn-done-wardrobe" class="btn btn-soft" type="button"><span aria-hidden="true">👗</span> My Witch</button>
+            <button id="btn-done-home" class="btn btn-soft" type="button"><span aria-hidden="true">🏠</span> Home</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== WARDROBE ===================== -->
+    <section id="screen-wardrobe" class="screen" data-screen="wardrobe" hidden>
+      <header class="topbar">
+        <button class="round-btn" type="button" data-go="home" aria-label="Back to home"><span aria-hidden="true">🏠</span></button>
+        <h2 class="topbar-title">My Witch</h2>
+        <div class="star-count" aria-label="Stars collected">
+          <span aria-hidden="true">⭐</span><b data-stars>0</b>
+        </div>
+      </header>
+      <div class="wardrobe-body">
+        <div class="wardrobe-preview">
+          <div class="caster caster-big">
+            <div class="witch" data-witch></div>
+            <div class="familiar" data-familiar></div>
+          </div>
+          <p id="wardrobe-caption" class="wardrobe-caption"></p>
+        </div>
+        <div class="wardrobe-picks">
+          <div class="panel">
+            <h3 class="pick-title">Robe colors</h3>
+            <div id="robe-picks" class="pick-grid"></div>
+          </div>
+          <div class="panel">
+            <h3 class="pick-title">Familiars</h3>
+            <div id="familiar-picks" class="pick-grid"></div>
+          </div>
+          <p class="wardrobe-hint">Master spells to earn stars and unlock more!</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== SPELLBOOK ===================== -->
+    <section id="screen-book" class="screen" data-screen="book" hidden>
+      <header class="topbar">
+        <button class="round-btn" type="button" data-go="home" aria-label="Back to home"><span aria-hidden="true">🏠</span></button>
+        <h2 class="topbar-title">My Spellbook</h2>
+        <div class="star-count" aria-label="Stars collected">
+          <span aria-hidden="true">⭐</span><b data-stars>0</b>
+        </div>
+      </header>
+      <div class="book-body">
+        <p class="book-hint">Tap a spell to hear it.</p>
+        <ul id="book-list" class="book-list"></ul>
+      </div>
+    </section>
+
+    <!-- ===================== GROWN-UPS ===================== -->
+    <section id="screen-parent" class="screen" data-screen="parent" hidden>
+      <header class="topbar">
+        <button class="round-btn" type="button" data-go="home" aria-label="Back to home"><span aria-hidden="true">🏠</span></button>
+        <h2 class="topbar-title">Grown-ups’ corner</h2>
+        <span class="topbar-spacer"></span>
+      </header>
+      <div class="parent-body">
+        <p id="save-note" class="save-note" role="status" hidden>
+          <span aria-hidden="true">💾</span> This device is not letting the game save right now (private browsing, or storage is full).
+          Everything still works, but changes last only for this visit.
+        </p>
+        <div class="panel">
+          <h3 class="pick-title">Spelling words</h3>
+          <label class="parent-label" for="word-input">
+            Type or paste this week’s words — one per line, or separated by commas or spaces.
+          </label>
+          <textarea id="word-input" class="word-input" rows="7" autocomplete="off" autocapitalize="off"
+            autocorrect="off" spellcheck="false" inputmode="text" enterkeyhint="enter"
+            placeholder="because&#10;friend&#10;people"></textarea>
+          <div class="parent-buttons">
+            <button id="btn-save-words" class="btn btn-start btn-medium" type="button">Save words</button>
+            <button id="btn-starter" class="btn btn-soft" type="button">Use starter list</button>
+          </div>
+          <p id="parent-message" class="parent-message" role="status" aria-live="polite"></p>
+          <div id="parent-preview" class="chip-list" aria-label="Current word list"></div>
+        </div>
+
+        <div class="panel">
+          <h3 class="pick-title">This week’s words</h3>
+          <label class="parent-label" for="week-input">
+            Paste just this week’s words. Older words stay saved for later.
+          </label>
+          <textarea id="week-input" class="word-input" rows="5" autocomplete="off" autocapitalize="off"
+            autocorrect="off" spellcheck="false" inputmode="text" enterkeyhint="enter"
+            placeholder="smiling&#10;racing&#10;were"></textarea>
+          <div class="parent-buttons">
+            <button id="btn-save-week" class="btn btn-start btn-medium" type="button">Save this week</button>
+            <button id="btn-week-only" class="btn btn-soft" type="button" aria-pressed="false">Practice this week only: off</button>
+          </div>
+          <p id="week-message" class="parent-message" role="status" aria-live="polite"></p>
+        </div>
+
+        <div class="panel">
+          <h3 class="pick-title">Spells per round</h3>
+          <div id="round-size" class="seg" role="group" aria-label="Spells per round">
+            <button class="seg-btn" type="button" data-size="3">3</button>
+            <button class="seg-btn" type="button" data-size="5">5</button>
+            <button class="seg-btn" type="button" data-size="8">8</button>
+            <button class="seg-btn" type="button" data-size="0">All</button>
+          </div>
+          <p class="parent-fine">Each word climbs four steps: copy, fill in, unmix, then spell from sound alone.</p>
+        </div>
+
+        <div class="panel">
+          <h3 class="pick-title">Potions (math)</h3>
+          <p class="parent-label">Math level</p>
+          <div id="math-level" class="seg" role="group" aria-label="Math level">
+            <button class="seg-btn" type="button" data-level="easy">Easy · within 20</button>
+            <button class="seg-btn" type="button" data-level="hundred">Within 100</button>
+          </div>
+          <p class="parent-label">Topics — tap to switch on or off</p>
+          <div id="math-topics" class="toggle-grid" role="group" aria-label="Math topics"></div>
+          <p id="math-message" class="parent-message" role="status" aria-live="polite"></p>
+          <p class="parent-fine">
+            A round brews 8 potions. A missed potion comes back a few turns later. Stars are shared with Spells.
+          </p>
+        </div>
+
+        <div class="panel">
+          <h3 class="pick-title">Math facts</h3>
+          <p id="facts-summary" class="parent-label"></p>
+          <ul id="slow-facts" class="fact-list" aria-label="Slow or missed facts"></ul>
+          <p id="slow-facts-note" class="parent-fine"></p>
+          <p id="facts-speedy" class="parent-fine"></p>
+          <p id="facts-message" class="parent-message" role="status" aria-live="polite"></p>
+          <div class="parent-buttons">
+            <button id="btn-reset-facts" class="btn btn-soft" type="button">Reset math facts</button>
+          </div>
+          <p class="parent-fine">
+            A fact is quick when it is answered right within about 6 seconds, without the dots or the hint.
+            The time the voice takes to read the question is not counted.
+            Slow and missed facts come back more often, also on later days. Once every fact of a drill is quick,
+            a speedy brew is offered: no countdown, nothing to lose, and it can always be skipped.
+          </p>
+        </div>
+
+        <div class="panel">
+          <h3 class="pick-title">Sound</h3>
+          <p id="voice-status" class="parent-fine"></p>
+          <div class="parent-buttons">
+            <button id="btn-test-voice" class="btn btn-soft" type="button"><span aria-hidden="true">🔊</span> Test the voice</button>
+            <button id="btn-sfx" class="btn btn-soft" type="button" aria-pressed="true">Chimes: on</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h3 class="pick-title">Progress</h3>
+          <p id="parent-progress" class="parent-fine"></p>
+          <div class="parent-buttons">
+            <button id="btn-reset" class="btn btn-soft" type="button">Reset stars &amp; progress</button>
+          </div>
+          <p class="parent-fine">
+            Resetting also clears the math facts. The word list and the settings stay.
+            Everything is saved only on this device. No accounts, no ads, no tracking, and nothing is sent anywhere.
+          </p>
+        </div>
+
+        <div class="parent-buttons parent-buttons-end">
+          <button class="btn btn-start btn-medium" type="button" data-go="home">Done</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ===================== SPELL / POTION RESULT ===================== -->
+  <div id="result" class="overlay" role="dialog" aria-modal="true" aria-labelledby="result-title" hidden>
+    <div class="result-card">
+      <div id="result-confetti" class="confetti" aria-hidden="true"></div>
+      <h2 id="result-title" class="result-title"></h2>
+      <div id="result-scene" class="scene" aria-hidden="true"></div>
+      <p id="result-text" class="result-text"></p>
+      <div id="result-word" class="result-word"></div>
+      <div id="result-stars" class="result-stars" hidden></div>
+      <p id="result-extra" class="result-extra" hidden></p>
+      <button id="btn-next" class="btn btn-cast" type="button">Next <span aria-hidden="true">➜</span></button>
+    </div>
+  </div>
+
+  <div id="fx" class="fx" aria-hidden="true"></div>
+
+  <noscript>
+    <p class="noscript">Spellcaster Academy needs JavaScript to cast spells and brew potions. Please turn it on and reload.</p>
+  </noscript>
+
+  <script src="words.js"></script>
+  <script src="potions.js"></script>
+  <script src="facts.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>
