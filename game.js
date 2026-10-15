@@ -398,7 +398,73 @@
       window.speechSynthesis.cancel();
     },
 
-    say(text, { rate = WORD_RATE, pitch = 1.1, queue = false } = {}) {
+    // Grok voice clips (public/audio/, made by scripts/gen-grok-voice.mjs) for this
+    // week's words and sentences. Anything without a clip, or a clip that will not
+    // play, uses the on-device voice as before.
+    clipQueue: [],
+    clipAudio: null,
+    clipFor(text) {
+      if (window.SPELLCASTER_NO_CLIPS) return null; // the tests check the on-device voice
+      const tw = window.SPELLCASTER_DATA && window.SPELLCASTER_DATA.thisWeek;
+      if (!tw || !Array.isArray(tw.words)) return null;
+      for (const w of tw.words) {
+        if (text === w) return `audio/${encodeURIComponent(w)}.mp3`;
+        if (tw.sentences && tw.sentences[w] === text) return `audio/${encodeURIComponent(w)}-sentence.mp3`;
+      }
+      return null;
+    },
+    stopClips() {
+      this.clipQueue = [];
+      if (this.clipAudio) {
+        const a = this.clipAudio;
+        this.clipAudio = null;
+        try { a.pause(); } catch (err) { /* already stopped */ }
+      }
+    },
+    nextClip() {
+      if (this.clipAudio || !this.clipQueue.length) return;
+      const item = this.clipQueue.shift();
+      if (item.synth) {
+        this.sayOnDevice(item.text, item.opts);
+        return this.nextClip();
+      }
+      const a = new Audio(item.url);
+      a.playbackRate = item.opts.rate < WORD_RATE ? 0.75 : 1;
+      this.clipAudio = a;
+      let done = false;
+      const end = (failed) => {
+        if (done) return;
+        done = true;
+        if (this.clipAudio !== a) return; // stopped
+        this.clipAudio = null;
+        if (failed) this.sayOnDevice(item.text, { ...item.opts, queue: true });
+        else this.set({ failed: false });
+        this.nextClip();
+      };
+      a.onended = () => end(false);
+      a.onerror = () => end(true);
+      this.talkMore(item.text, item.opts.rate || 1);
+      const p = a.play();
+      if (p && p.catch) p.catch(() => end(true));
+    },
+
+    say(text, opts = {}) {
+      const url = this.clipFor(text);
+      const busy = this.clipAudio || this.clipQueue.length;
+      if (!url && !(opts.queue && busy)) {
+        if (!opts.queue) this.stopClips();
+        return this.sayOnDevice(text, opts);
+      }
+      if (!opts.queue) {
+        this.stopClips();
+        try { this.cancel(); } catch (err) { /* nothing to stop */ }
+      }
+      this.clipQueue.push(url ? { url, text, opts: { rate: WORD_RATE, ...opts } } : { synth: true, text, opts });
+      this.nextClip();
+      return true;
+    },
+
+    sayOnDevice(text, { rate = WORD_RATE, pitch = 1.1, queue = false } = {}) {
       if (this.available === 'missing') return false;
       const voice = this.voice || this.pickVoice();
       if (!voice) {
@@ -438,6 +504,7 @@
     },
 
     hush() {
+      this.stopClips();
       if (this.available === 'missing') return;
       try {
         this.cancel();
