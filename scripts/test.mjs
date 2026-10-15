@@ -214,6 +214,7 @@ async function openPage(browser, baseUrl, size, {
     hasTouch: true,
     reducedMotion,
   });
+  await context.addInitScript(() => { window.SPELLCASTER_NO_CLIPS = true; });
   if (speech === 'stub') await context.addInitScript(speechStub, {});
   else if (speech === 'none') await context.addInitScript(removeSpeech);
   else if (speech !== 'real') await context.addInitScript(speechStub, speech);

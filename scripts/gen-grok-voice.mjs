@@ -11,7 +11,7 @@ fs.mkdirSync('public/audio', { recursive: true });
 async function tts(text, file) {
   const r = await fetch('https://api.x.ai/v1/tts', { method: 'POST',
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, voice_id: 'eve', language: 'en' }) });
+    body: JSON.stringify({ text, voice_id: process.env.GROK_VOICE || 'luna', language: 'en' }) });
   if (!r.ok) throw new Error(`${file}: ${r.status} ${await r.text()}`);
   fs.writeFileSync(file, Buffer.from(await r.arrayBuffer())); console.log('wrote', file);
 }
