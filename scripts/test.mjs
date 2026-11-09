@@ -6,6 +6,7 @@
 //   npm test              everything
 //   npm test -- potions   only the scenarios with "potions" in their name
 //   npm test -- math      only the math fluency scenarios (ten-frames, hints, drills, speedy brews, slow facts)
+//   npm test -- subtract  subtracting tens and borrowing, the two separate practice modes
 //   npm test -- "math fix"  only the scenarios for the findings of the math review (mathup/REVIEW-MATH.md)
 //
 // Uses WebKit when its browser is installed, otherwise Chromium.
@@ -19,6 +20,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SHOTS = path.join(ROOT, 'screenshots');
 const STORE_KEY = 'spellcaster-academy-v1';
 const FACTS_KEY = 'spellcaster-academy-facts-v1'; // fact memory: its own key, next to the save above
+const SUBTRACT_KEY = 'spellcaster-academy-subtract-v1'; // subtracting practice: its own key too
 const MIN_TAP = 60;
 
 const SIZES = [
@@ -883,6 +885,15 @@ async function readBrew(page) {
       minuteTurn: turnOf('.clock-minute'),
       coins: [...box.querySelectorAll('.coin')].map((node) => Number(node.dataset.cents)),
       coinLabels: texts('.coin'),
+      factLine: (box.querySelector('.tens-fact') || { textContent: '' }).textContent.trim(),
+      gone: box.querySelectorAll('.pv-rod.is-gone').length,
+      cracked: box.querySelectorAll('.pv-rod.is-cracked').length,
+      traded: box.querySelectorAll('.pv-cube.is-traded').length,
+      borrowed: (box.querySelector('.bp-borrowed') || { textContent: '' }).textContent.trim(),
+      borrowTop: Number((box.querySelector('[data-borrow-top]') || { dataset: {} }).dataset.borrowTop),
+      borrowBottom: Number((box.querySelector('[data-borrow-bottom]') || { dataset: {} }).dataset.borrowBottom),
+      hint: (document.querySelector('.practice-hint') || { textContent: '' }).textContent.trim(),
+      mode: document.querySelector('#screen-brew').dataset.mode,
       slots: texts('.slot', document.querySelector('#brew-slots')),
       marks: texts('.slot-mark', document.querySelector('#brew-slots')),
       tiles: [...document.querySelectorAll('#brew-tiles .tile')].map((tile) => tile.dataset.digit),
@@ -949,6 +960,16 @@ function solveBrew(seen) {
     answer = seen.coins.reduce((sum, cents) => sum + cents, 0);
     numbers = seen.coins.concat(answer);
     solved = new RegExp(`= ${answer}¢$`);
+  } else if (seen.show === 'tens') {
+    const a = parseInt(seen.equation[0], 10);
+    const b = parseInt(seen.equation[2], 10);
+    answer = a - b;
+    numbers = [a, b, answer];
+    solved = new RegExp(`= ${answer}$`);
+  } else if (seen.show === 'borrow') {
+    answer = seen.borrowTop - seen.borrowBottom;
+    numbers = [seen.borrowTop, seen.borrowBottom, answer];
+    solved = new RegExp(`= ${answer}$`);
   }
   return { digits: String(answer), wrong: String(answer + 1), solved, numbers };
 }
@@ -968,6 +989,8 @@ function asSeen(problem) {
     hourTurn: show.type === 'clock' ? (show.hour % 12) * 30 + show.minute / 2 : null,
     minuteTurn: show.type === 'clock' ? show.minute * 6 : null,
     coins: show.cents || [],
+    borrowTop: show.top,
+    borrowBottom: show.bottom,
   };
 }
 
@@ -2532,7 +2555,7 @@ async function keyboardCannotAnswer(browser, baseUrl) {
 
 const DAY = 24 * 60 * 60 * 1000;
 const DRILLS = ['make10', 'doubles'];
-const MAIN_SAVE_KEYS = ['words', 'custom', 'week', 'weekOnly', 'roundSize', 'progress', 'math', 'stars', 'robe', 'familiar', 'chimes'];
+const MAIN_SAVE_KEYS = ['words', 'custom', 'week', 'weekOnly', 'weekApplied', 'roundSize', 'progress', 'math', 'stars', 'robe', 'familiar', 'chimes'];
 
 // One saved fact for a seeded fact memory. `due` says whether its wait is over.
 function savedFact(box, { due = false, miss = false, pace = 'quick', times = [3000], seen = 3, right = 3 } = {}) {
@@ -3138,7 +3161,7 @@ async function checkMenu(page, label, speedy = []) {
       sideways: document.documentElement.scrollWidth > window.innerWidth + 1,
     };
   });
-  const want = ['btn-mix', 'btn-drill-make10', ...(speedy.includes('make10') ? ['btn-speedy-make10'] : []), 'btn-drill-doubles', ...(speedy.includes('doubles') ? ['btn-speedy-doubles'] : [])];
+  const want = ['btn-mix', 'btn-drill-make10', ...(speedy.includes('make10') ? ['btn-speedy-make10'] : []), 'btn-drill-doubles', ...(speedy.includes('doubles') ? ['btn-speedy-doubles'] : []), 'btn-practice-tens', 'btn-practice-borrow'];
   check(menu.cards.map((card) => card.id).join() === want.join(), `${label}: the menu offers ${want.length} potions to choose from`, menu.cards.map((card) => card.id).join());
   check(menu.cards.every((card) => card.height >= MIN_TAP && card.width >= 200), `${label}: every menu card is big enough for small fingers`,
     menu.cards.map((card) => `${Math.round(card.width)}x${Math.round(card.height)}`).join(', '));
@@ -4335,6 +4358,307 @@ async function speedyPotionsCount(browser, browserName, baseUrl) {
   await context.close();
 }
 
+// ---------------------------------------------------------------- subtracting tens, and borrowing, as two separate modes
+
+const readSubtract = (page) => page.evaluate((key) => JSON.parse(window.localStorage.getItem(key) || 'null'), SUBTRACT_KEY);
+
+async function subtractingPractice(browser, baseUrl) {
+  // The recipes themselves: every problem, and the rounds that are built from them.
+  const rules = await (await openPage(browser, baseUrl, SIZES[0], { reducedMotion: 'reduce' })).page.evaluate(() => {
+    const P = window.SPELLCASTER_POTIONS;
+    const tens = P.practiceProblems('tens');
+    const borrow = P.practiceProblems('borrow');
+    const bad = [];
+    const note = (problem, why) => { if (bad.length < 4) bad.push(`${problem.key}: ${why}`); };
+    for (const problem of tens) {
+      const a = problem.practice.a;
+      const b = problem.practice.b;
+      const fact = a / 10 - b / 10;
+      if (problem.topic !== 'tens') note(problem, 'wrong topic');
+      if (a % 10 || b % 10 || a < 10 || a > 90 || b < 0 || b > a) note(problem, 'not tens within 0 to 90');
+      if (Number(problem.answer) !== a - b || Number(problem.answer) < 0 || Number(problem.answer) > 90) note(problem, 'answer out of range');
+      if (problem.show.tens !== a / 10 || problem.show.take !== b / 10 || problem.show.fact !== fact) note(problem, 'rods do not match the fact');
+      if (!problem.show.parts || problem.show.parts.join(' ') !== `${a} − ${b} = ?`) note(problem, 'the sum is not on screen');
+      const hint = P.practiceHint(problem, String(fact), 0);
+      const phrase = (n) => (n === 1 ? '1 ten' : `${n} tens`);
+      if (fact === 0) {
+        if (hint.close) note(problem, 'zero is the right answer, not a near miss');
+      } else if (hint.text !== `Close! These are tens. ${phrase(a / 10)} minus ${phrase(b / 10)} is ${phrase(fact)}, which is ${a - b}.`) {
+        note(problem, `ones-fact hint was "${hint.text}"`);
+      }
+    }
+    for (const problem of borrow) {
+      const { top, bottom, T, O, B, C, ones, tens } = problem.practice;
+      if (problem.topic !== 'borrow') note(problem, 'wrong topic');
+      if (top < 10 || top > 99 || bottom < 10 || bottom > 99) note(problem, 'not two two-digit numbers');
+      if (!(O < C) || top <= bottom) note(problem, 'does not need borrowing, or goes negative');
+      if (Number(problem.answer) !== top - bottom || Number(problem.answer) < 1 || Number(problem.answer) > 99) note(problem, 'answer out of range');
+      if (ones !== O + 10 - C || tens !== T - 1 - B) note(problem, 'the trade is wrong');
+      if (problem.show.top !== top || problem.show.bottom !== bottom) note(problem, 'the written form has the wrong numbers');
+    }
+    const tensKeys = new Set(tens.map((problem) => problem.key));
+    const borrowKeys = new Set(borrow.map((problem) => problem.key));
+    const missed = { 'tens:80-60': 4, 'tens:50-30': 1, 'borrow:52-27': 3, 'nope': 9 };
+    const tensRounds = Array.from({ length: 30 }, () => P.practiceRound('tens', missed, 8).map((problem) => problem.key));
+    const borrowRounds = Array.from({ length: 30 }, () => P.practiceRound('borrow', missed, 8).map((problem) => problem.key));
+    const mixed = Array.from({ length: 20 }, () => P.makeRound({
+      level: 'hundred',
+      topics: Object.fromEntries(P.topics.map((topic) => [topic.id, true])),
+    }, 8).map((problem) => problem.topic));
+    const classic = P.practiceHint(P.build.tens(80, 60), '2', 0);
+    const flipped = P.practiceHint(P.build.borrow(52, 27), '35', 0);
+    const forgot = P.practiceHint(P.build.borrow(52, 28), '34', 0);
+    const second = P.practiceHint(P.build.borrow(52, 27), '35', 1);
+    const cleaned = P.cleanSubtract({ missed: { 'tens:80-60': 2, 'borrow:52-27': 1, 'add:3+4': 5, 'tens:no': 1, 'tens:80-60': 2 } });
+    return {
+      bad,
+      tensCount: tens.length,
+      borrowCount: borrow.length,
+      tensKeys: tensKeys.size,
+      borrowKeys: borrowKeys.size,
+      overlap: [...tensKeys].filter((key) => borrowKeys.has(key)).length,
+      tensRounds,
+      borrowRounds,
+      mixed,
+      classic: classic.text,
+      flipped: flipped.text,
+      forgot: forgot.text,
+      second: second.text,
+      cleaned,
+      harsh: /wrong|bad|fail|stupid|dumb/i.test([classic.text, flipped.text, forgot.text, second.text].join(' ')),
+    };
+  });
+  check(rules.bad.length === 0, 'subtract: every generated problem follows the rules', rules.bad.join(' | '));
+  check(rules.tensCount >= 40 && rules.tensKeys === rules.tensCount, 'subtract: plenty of different tens problems', String(rules.tensCount));
+  check(rules.borrowCount >= 200 && rules.borrowKeys === rules.borrowCount, 'subtract: plenty of different borrowing problems', String(rules.borrowCount));
+  check(rules.overlap === 0, 'subtract: a tens problem is never also a borrowing problem');
+  check(rules.classic === 'Close! These are tens. 8 tens minus 6 tens is 2 tens, which is 20.', 'subtract: 2 for 80 − 60 gets the tens hint', rules.classic);
+  check(/2 is smaller than 7/.test(rules.flipped) && /12 − 7 = 5/.test(rules.flipped) && !/answer is 25/.test(rules.flipped),
+    'subtract: subtracting the little digit from the big one gets a borrowing hint', rules.flipped);
+  check(/ones are right/.test(rules.forgot) && /4 − 2/.test(rules.forgot), 'subtract: forgetting to take the traded ten off the tens is named', rules.forgot);
+  check(/The answer is 25/.test(rules.second), 'subtract: a second borrowing miss shows how the answer is built', rules.second);
+  check(!rules.harsh, 'subtract: hints never scold');
+  check(rules.tensRounds.every((round) => round.length === 8 && round.every((key) => key.startsWith('tens:')) && new Set(round).size === 8 && round[0] === 'tens:80-60'),
+    'subtract: a tens round is only tens, and the one she misses most comes first');
+  check(rules.borrowRounds.every((round) => round.length === 8 && round.every((key) => key.startsWith('borrow:')) && new Set(round).size === 8 && round[0] === 'borrow:52-27'),
+    'subtract: a borrowing round is only borrowing, and never a tens problem');
+  check(rules.mixed.every((round) => round.length === 8 && round.every((topic) => !['tens', 'borrow'].includes(topic))),
+    'subtract: mixed potions never include either subtracting mode');
+  check(JSON.stringify(rules.cleaned.missed) === '{"tens:80-60":2,"borrow:52-27":1}', 'subtract: a damaged memory keeps only real problems', JSON.stringify(rules.cleaned));
+
+  // The menu: two clearly separate choices, on every iPad size, and nothing else moved.
+  for (const size of [...SIZES, ...TIGHT_SIZES]) {
+    const tag = `subtract menu ${size.name}`;
+    const { context, page, problems } = await openPage(browser, baseUrl, size, { reducedMotion: 'reduce' });
+    await tap(page, '#btn-potions');
+    await page.waitForSelector('#screen-potions:not([hidden])');
+    await sleep(200);
+    const cards = await checkMenu(page, tag);
+    const tens = cards.find((card) => card.id === 'btn-practice-tens');
+    const borrow = cards.find((card) => card.id === 'btn-practice-borrow');
+    check(tens && /Subtract tens/.test(tens.text) && /80 − 60/.test(tens.text), `${tag}: Subtract tens is its own button`, tens && tens.text);
+    check(borrow && /Borrow/.test(borrow.text) && /52 − 27/.test(borrow.text), `${tag}: Borrow is its own button`, borrow && borrow.text);
+    check(/Mixed potions/.test(cards[0].text) && /Make 10/.test(cards[1].text), `${tag}: the old choices are still there`);
+    if (size === SIZES[0] || size === SIZES[1]) await shot(page, `30-subtract-menu-${size.name}`);
+    check(problems.length === 0, `${tag}: no errors in the browser console`, problems.slice(0, 3).join(' | '));
+    await context.close();
+  }
+
+  // Playing: the tens mistake, a retry, coming back after one other problem, then borrowing.
+  const { context, page, problems } = await openPage(browser, baseUrl, SIZES[0], { reducedMotion: 'reduce', saved: { stars: 4 } });
+  const factsBefore = await readFacts(page);
+  await page.evaluate(() => {
+    const P = window.SPELLCASTER_POTIONS;
+    const tens = ['80-60', '50-30', '40-20', '70-10', '90-20', '30-30', '60-10', '20-10'].map((pair) => {
+      const [a, b] = pair.split('-').map(Number);
+      return P.build.tens(a, b);
+    });
+    const borrow = ['52-27', '52-28', '41-15', '80-46', '63-27', '90-18', '34-19', '71-25'].map((pair) => {
+      const [a, b] = pair.split('-').map(Number);
+      return P.build.borrow(a, b);
+    });
+    P.practiceRound = (kind) => (kind === 'borrow' ? borrow : tens);
+  });
+  await startPotions(page, '#btn-practice-tens');
+  let seen = await readBrew(page);
+  check(seen.mode === 'practice' && seen.topic === 'tens' && seen.equation.join(' ') === '80 − 60 = ?', 'subtract: Subtract tens opens on its own round', `${seen.mode} ${seen.equation.join(' ')}`);
+  check(seen.rods === 8 && seen.gone === 6 && seen.cracked === 0, 'subtract: 80 − 60 shows 8 ten-rods, 6 of them taken away', `${seen.rods} rods, ${seen.gone} gone`);
+  check(seen.factLine === '8 − 6 = 2 tens', 'subtract: the basic fact is on the screen', seen.factLine);
+  check(!(await isShowing(page, '#btn-dots')) && !(await isShowing(page, '#btn-hint')), 'subtract: tens does not use the addition Dots and Hint buttons');
+  await checkPlayLayout(page, 'subtract tens 80-60', '#screen-brew', BREW_ROWS);
+  await checkBrewPicture(page, 'subtract tens 80-60');
+  await shot(page, '31-subtract-tens-portrait');
+  await tapDigits(page, '2');
+  check((await brewAndSeeResult(page)) === 'retry', 'subtract: answering 2 stays for another try');
+  check((await page.locator('#result-title').innerText()) === 'Close!', 'subtract: the near miss is greeted kindly');
+  const hintText = await page.locator('#result-text').innerText();
+  check(hintText === 'Close! These are tens. 8 tens minus 6 tens is 2 tens, which is 20.', 'subtract: the hint tells her 2 tens is 20', hintText);
+  check(/Try again/.test(await page.locator('#btn-next').innerText()), 'subtract: the button lets her try again');
+  const spoken = await spokenList(page);
+  check(spoken.some((line) => line.text === hintText), 'subtract: the hint is read aloud');
+  await sleep(200);
+  check(await resultCardFits(page), 'subtract: the tens hint card fits');
+  await shot(page, '32-subtract-tens-hint-portrait');
+  await tapNext(page);
+  seen = await readBrew(page);
+  check(seen.equation.join(' ') === '80 − 60 = ?' && seen.slots.join('') === '', 'subtract: Try again clears the answer and keeps the same problem', seen.slots.join(''));
+  check(seen.hint === hintText, 'subtract: the hint stays on screen while she tries again', seen.hint);
+  await checkPlayLayout(page, 'subtract tens hint showing', '#screen-brew', BREW_ROWS);
+  await tapDigits(page, '2');
+  check((await brewAndSeeResult(page)) === 'fizzle', 'subtract: a second 2 fizzles gently, with the answer');
+  check(/20/.test(await page.locator('#result-word').innerText()), 'subtract: the fizzle shows 20');
+  await tapNext(page);
+  seen = await readBrew(page);
+  check(seen.equation.join(' ') === '50 − 30 = ?', 'subtract: the missed tens problem waits for one other problem first', seen.equation.join(' '));
+  await tapDigits(page, '20');
+  check((await brewAndSeeResult(page)) === 'brewed', 'subtract: a first-try tens problem brews');
+  check((await page.locator('#result-stars .big-star.is-won').count()) === 2, 'subtract: a first try earns 2 stars');
+  await tapNext(page);
+  seen = await readBrew(page);
+  check(seen.equation.join(' ') === '80 − 60 = ?', 'subtract: 80 − 60 comes back right after that one problem', seen.equation.join(' '));
+  await tap(page, '#btn-brew-quit');
+  await page.waitForSelector('#screen-home:not([hidden])');
+
+  // Borrowing is a different round, with the trade drawn and a step-by-step hint.
+  await startPotions(page, '#btn-practice-borrow');
+  seen = await readBrew(page);
+  check(seen.mode === 'practice' && seen.topic === 'borrow' && seen.borrowTop === 52 && seen.borrowBottom === 27, 'subtract: Borrow opens on 52 − 27, not a tens problem', `${seen.topic} ${seen.borrowTop}-${seen.borrowBottom}`);
+  check(seen.cracked === 1 && seen.traded === 10 && seen.borrowed === '1' && seen.rods === 5, 'subtract: one ten is broken into 10 ones, and the borrowed 1 is written', `${seen.rods} rods, ${seen.cracked} cracked, ${seen.traded} traded, borrowed ${seen.borrowed}`);
+  check(seen.equation.join(' ').includes('80') === false, 'subtract: the borrowing screen is not a tens problem');
+  await checkPlayLayout(page, 'subtract borrow 52-27', '#screen-brew', BREW_ROWS);
+  await checkBrewPicture(page, 'subtract borrow 52-27');
+  await shot(page, '33-subtract-borrow-portrait');
+  await tapDigits(page, '35');
+  check((await brewAndSeeResult(page)) === 'retry', 'subtract: 35 for 52 − 27 gets a hint instead of ending the turn');
+  const borrowHint = await page.locator('#result-text').innerText();
+  check(/2 is smaller than 7/.test(borrowHint) && /12 − 7 = 5/.test(borrowHint) && !/answer is 25/.test(borrowHint), 'subtract: the first hint shows the trade, not the whole answer', borrowHint);
+  await shot(page, '34-subtract-borrow-hint-portrait');
+  await tapNext(page);
+  await tapDigits(page, '99');
+  check((await brewAndSeeResult(page)) === 'retry', 'subtract: a second miss still lets her try');
+  const fuller = await page.locator('#result-text').innerText();
+  check(/The answer is 25/.test(fuller), 'subtract: the second hint puts the answer together', fuller);
+  await tapNext(page);
+  seen = await readBrew(page);
+  check(seen.borrowTop === 52 && seen.borrowBottom === 27 && /25/.test(seen.hint), 'subtract: the answer hint stays up for the retry', seen.hint);
+  await tapDigits(page, '25');
+  check((await brewAndSeeResult(page)) === 'brewed', 'subtract: 25 brews the potion');
+  check((await page.locator('#result-stars .big-star.is-won').count()) === 1, 'subtract: borrowing after a hint earns 1 star');
+  await tapNext(page);
+  seen = await readBrew(page);
+  check(seen.borrowTop === 52 && seen.borrowBottom === 28, 'subtract: the next borrowing problem is still borrowing', `${seen.borrowTop}-${seen.borrowBottom}`);
+  await tapDigits(page, solveBrew(seen).digits);
+  check((await brewAndSeeResult(page)) === 'brewed', 'subtract: a first-try borrowing problem brews');
+  check((await page.locator('#result-stars .big-star.is-won').count()) === 2, 'subtract: a first-try borrowing problem earns 2 stars');
+  await tapNext(page);
+  await tap(page, '#btn-brew-quit');
+  await page.waitForSelector('#screen-home:not([hidden])');
+
+  // Nothing already saved was rewritten, and the miss is remembered for next time.
+  const after = await readSaved(page);
+  check(Array.isArray(after.words) && after.words.length >= 8 && after.stars === 9, 'subtract: stars are added and the word list is still there', `${after.stars} stars, ${after.words && after.words.length} words`);
+  check(JSON.stringify(Object.keys(after.math.topics).sort()) === JSON.stringify([...ALL_TOPICS].sort()) && !after.subtract, 'subtract: math topics are unchanged and the practice memory is not inside the game save', Object.keys(after.math.topics).join());
+  check(JSON.stringify(await readFacts(page)) === JSON.stringify(factsBefore), 'subtract: addition facts are not changed', JSON.stringify(await readFacts(page)));
+  const memory = await readSubtract(page);
+  check(memory && memory.missed['tens:80-60'] >= 1 && memory.missed['borrow:52-27'] >= 1, 'subtract: a missed tens problem and a helped borrowing problem both come back', JSON.stringify(memory));
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForSelector('#screen-home:not([hidden])');
+  await startPotions(page, '#btn-practice-tens');
+  const again = [];
+  for (let turn = 1; turn <= 8; turn++) {
+    again.push((await readBrew(page)).equation.join(' '));
+    await tapDigits(page, solveBrew(await readBrew(page)).digits);
+    await brewAndSeeResult(page);
+    await tapNext(page);
+  }
+  check(again[0] === '80 − 60 = ?' && again.every((sum) => /^\d+ − \d+ = \?$/.test(sum)) && new Set(again).size === 8, 'subtract: the next tens round starts with the missed one and stays tens', again.join(' | '));
+  await tap(page, '#btn-done-home');
+  await startPotions(page, '#btn-practice-borrow');
+  const borrowRound = [];
+  for (let turn = 1; turn <= 3; turn++) {
+    const now = await readBrew(page);
+    borrowRound.push(`${now.topic}:${now.borrowTop}-${now.borrowBottom}`);
+    check(now.show === 'borrow' && now.cracked === 1 && now.traded === 10 && now.borrowed === '1', `subtract: borrowing turn ${turn} shows the trade`, `${now.show} cracked ${now.cracked}`);
+    await tapDigits(page, solveBrew(now).digits);
+    await brewAndSeeResult(page);
+    await tapNext(page);
+  }
+  check(borrowRound.every((item) => item.startsWith('borrow:')), 'subtract: a borrowing round never asks a tens problem', borrowRound.join(' | '));
+  await tap(page, '#btn-brew-quit');
+  await startPotions(page);
+  const mixed = [];
+  for (let turn = 1; turn <= 8; turn++) {
+    mixed.push((await readBrew(page)).topic);
+    await tapDigits(page, solveBrew(await readBrew(page)).digits);
+    await brewAndSeeResult(page);
+    await tapNext(page);
+  }
+  check(mixed.every((topic) => !['tens', 'borrow'].includes(topic)) && new Set(mixed).size >= 2, 'subtract: mixed potions still use the old topics', mixed.join(','));
+  await tap(page, '#btn-done-home');
+  await tap(page, '#btn-spells');
+  await page.waitForSelector('#screen-play:not([hidden])');
+  check(!(await isShowing(page, '#screen-brew')), 'subtract: Spells still opens the spelling screen');
+  await tap(page, '#btn-quit');
+  check(problems.length === 0, 'subtract: no errors in the browser console', problems.slice(0, 3).join(' | '));
+  await context.close();
+
+  // The fullest pictures, and a hint card, on the tightest iPad sizes.
+  for (const size of [SIZES[1], ...TIGHT_SIZES]) {
+    const tag = `subtract picture ${size.name}`;
+    const { context, page, problems } = await openPage(browser, baseUrl, size, { reducedMotion: 'reduce' });
+    await page.evaluate(() => {
+      const P = window.SPELLCASTER_POTIONS;
+      const tens = [P.build.tens(90, 0), P.build.tens(80, 60), P.build.tens(80, 80), P.build.tens(20, 10)];
+      const borrow = [P.build.borrow(98, 19), P.build.borrow(52, 27), P.build.borrow(20, 11), P.build.borrow(70, 35)];
+      P.practiceRound = (kind) => (kind === 'borrow' ? borrow : tens);
+    });
+    await startPotions(page, '#btn-practice-tens');
+    for (const label of ['90 − 0', '80 − 60', '80 − 80']) {
+      const seen = await readBrew(page);
+      check(seen.equation.join(' ').startsWith(label), `${tag}: showing ${label}`, seen.equation.join(' '));
+      const keep = seen.rods - seen.gone;
+      check(seen.rods === Number(label.slice(0, 2)) / 10 && seen.gone === Number(label.slice(5)) / 10, `${tag}: ${label} rods`, `${seen.rods} rods, ${seen.gone} gone`);
+      await checkPlayLayout(page, `${tag} ${label}`, '#screen-brew', BREW_ROWS);
+      await checkBrewPicture(page, `${tag} ${label}`);
+      if (label === '80 − 60') {
+        await tapDigits(page, '2');
+        check((await brewAndSeeResult(page)) === 'retry', `${tag}: the hint card opens`);
+        check(await resultCardFits(page), `${tag}: the hint card fits on the screen`);
+        await tapNext(page);
+        await checkPlayLayout(page, `${tag} hint showing`, '#screen-brew', BREW_ROWS);
+        check(keep === 2, `${tag}: two rods are left`);
+      }
+      await tapDigits(page, solveBrew(await readBrew(page)).digits);
+      await brewAndSeeResult(page);
+      await tapNext(page);
+    }
+    await tap(page, '#btn-brew-quit');
+    await startPotions(page, '#btn-practice-borrow');
+    for (const pair of ['98-19', '52-27', '20-11']) {
+      const seen = await readBrew(page);
+      check(`${seen.borrowTop}-${seen.borrowBottom}` === pair, `${tag}: borrowing ${pair}`, `${seen.borrowTop}-${seen.borrowBottom}`);
+      const [top, bottom] = pair.split('-').map(Number);
+      check(seen.cracked === 1 && seen.traded === 10 && seen.borrowed === '1' && seen.rods === Math.floor(top / 10), `${tag}: ${pair} shows the broken ten`, `${seen.rods} rods`);
+      check(top % 10 < bottom % 10, `${tag}: ${pair} needs borrowing`);
+      await checkPlayLayout(page, `${tag} borrow ${pair}`, '#screen-brew', BREW_ROWS);
+      await checkBrewPicture(page, `${tag} borrow ${pair}`);
+      if (pair === '52-27' && size.name === 'landscape') await shot(page, '33-subtract-borrow-landscape');
+      if (pair === '52-27') {
+        await tapDigits(page, '35');
+        await brewAndSeeResult(page);
+        check(await resultCardFits(page), `${tag}: the borrowing hint card fits`);
+        await tapNext(page);
+        await checkPlayLayout(page, `${tag} borrow hint showing`, '#screen-brew', BREW_ROWS);
+      }
+      await tapDigits(page, solveBrew(await readBrew(page)).digits);
+      await brewAndSeeResult(page);
+      await tapNext(page);
+    }
+    check(problems.length === 0, `${tag}: no errors in the browser console`, problems.slice(0, 3).join(' | '));
+    await context.close();
+  }
+}
+
 // ---------------------------------------------------------------- run
 
 const scenarios = [
@@ -4373,6 +4697,7 @@ const scenarios = [
   ['math fix 4: mixed rounds keep reviewing a fact until it is quick, and after', (b, name, url) => spacedReviewInMixedRounds(b, url)],
   ['math fix 5: the stopwatch leaves out the voice', (b, name, url) => stopwatchLeavesOutTheVoice(b, url)],
   ['math fix 6: speedy potions count as brewed', (b, name, url) => speedyPotionsCount(b, name, url)],
+  ['subtract tens and borrowing, kept in separate rounds', (b, name, url) => subtractingPractice(b, url)],
 ];
 
 fs.mkdirSync(SHOTS, { recursive: true });

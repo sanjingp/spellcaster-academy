@@ -1192,6 +1192,211 @@ textarea:focus-visible {
   color: var(--ink-soft);
 }
 
+/* ---- subtracting tens: rods that stay, and rods to take away ---- */
+
+.tens-take {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+
+.tens-take .eq {
+  font-size: clamp(32px, 6vmin, 56px);
+}
+
+.tens-rods {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: clamp(14px, 3vmin, 28px);
+}
+
+.tens-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
+
+.tens-pile {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  min-height: 8px;
+}
+
+.tens-rods .pv-rod {
+  --u: clamp(7px, 1.15vmin, 11px);
+  width: var(--u);
+  height: calc(var(--u) * 8);
+}
+
+.pv-rod.is-gone {
+  position: relative;
+  opacity: 0.4;
+}
+
+.rod-slash {
+  position: absolute;
+  left: -3px;
+  right: -3px;
+  top: 0;
+  bottom: 0;
+  background: linear-gradient(to top right, transparent 45%, #d83e90 45% 55%, transparent 55%);
+}
+
+.tens-tag,
+.tens-fact {
+  margin: 0;
+  font-size: clamp(16px, 2.4vmin, 20px);
+  font-weight: 800;
+  line-height: 1.15;
+  color: var(--ink-soft);
+}
+
+.tens-group.is-away .tens-tag {
+  color: var(--pink-deep);
+}
+
+.tens-fact {
+  color: #6a34c8;
+  font-weight: 900;
+}
+
+.problem.is-helping .tens-rods .pv-rod {
+  --u: 7px;
+}
+
+.problem.is-helping .tens-fact,
+.problem.is-helping .tens-tag {
+  font-size: 15px;
+}
+
+/* ---- borrowing: the written trade, plus rods and the broken ten ---- */
+
+.borrow-board {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(10px, 2.4vmin, 22px);
+  width: 100%;
+}
+
+.borrow-paper {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: 0.85em 1.35em 1.9em;
+  justify-items: center;
+  align-items: center;
+  column-gap: 0.12em;
+  row-gap: 0.04em;
+  padding: 6px 10px 8px;
+  border-radius: 16px;
+  background: #fff;
+  border: 3px solid #ecdffc;
+  font-size: clamp(22px, 4vmin, 34px);
+  font-weight: 900;
+  line-height: 1.05;
+  color: #6a34c8;
+}
+
+.bp-old {
+  font-size: 0.72em;
+  color: #b9a6e6;
+  text-decoration: line-through;
+  text-decoration-thickness: 2px;
+}
+
+.bp-new,
+.bp-num,
+.bp-mark {
+  color: #6a34c8;
+}
+
+.bp-traded {
+  display: inline-flex;
+  align-items: flex-start;
+  color: #d98a00;
+}
+
+.bp-borrowed {
+  font-size: 0.62em;
+  line-height: 1;
+  margin-top: 0.05em;
+}
+
+.bp-line {
+  grid-column: 1 / -1;
+  justify-self: stretch;
+  height: 3px;
+  margin: 2px 0;
+  border-radius: 2px;
+  background: #6a34c8;
+}
+
+.bp-blank {
+  color: #b36b00;
+}
+
+.borrow-blocks {
+  --u: clamp(7px, 1.15vmin, 11px);
+  gap: calc(var(--u) * 1.1);
+}
+
+.borrow-blocks .blocks-pile {
+  height: calc(var(--u) * 8);
+}
+
+.borrow-blocks .pv-rod {
+  height: calc(var(--u) * 8);
+}
+
+.pv-rod.is-cracked {
+  position: relative;
+  background: repeating-linear-gradient(180deg, #ffd0e6 0, #ffd0e6 calc(var(--u) - 2px), #d83e90 calc(var(--u) - 2px), #d83e90 var(--u));
+  border-color: #d83e90;
+}
+
+.pv-rod.is-cracked::after {
+  content: '';
+  position: absolute;
+  left: -3px;
+  right: -3px;
+  top: 46%;
+  height: 4px;
+  border-radius: 2px;
+  background: #fffaf8;
+  transform: rotate(-16deg);
+}
+
+.ones-piles {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.blocks-from-ten {
+  padding: 2px;
+  border: 2px dashed #d83e90;
+  border-radius: 8px;
+}
+
+.pv-cube.is-traded {
+  background: #ff9ecb;
+  border-color: #d83e90;
+}
+
+.problem.is-helping .borrow-paper {
+  font-size: clamp(16px, 2.6vmin, 22px);
+  padding: 4px 8px;
+}
+
+.problem.is-helping .borrow-blocks {
+  --u: 7px;
+}
+
 /* ---- skip counting: a row of bubbles ---- */
 
 .seq {
@@ -1472,6 +1677,25 @@ textarea:focus-visible {
   color: var(--ink-soft);
 }
 
+/* The reminder that stays up while she tries a subtracting problem again. */
+.helper[data-view="practice"] {
+  height: auto;
+  min-height: 0;
+  max-height: none;
+}
+
+.practice-hint {
+  margin: 0;
+  max-width: 34em;
+  padding: 6px 12px;
+  border-radius: 14px;
+  background: #fff3c4;
+  font-size: clamp(16px, 2.4vmin, 20px);
+  font-weight: 800;
+  line-height: 1.25;
+  color: #7a4a00;
+}
+
 /* A hop is as big as the row allows, and smaller only when there are many of them (--n).
    The percentage is of this row's width, so --hop is only used for the width of a hop. */
 .hops {
@@ -1687,6 +1911,46 @@ textarea:focus-visible {
   box-shadow: 0 3px 0 #2f47b4, 0 6px 12px rgba(20, 30, 110, 0.36), inset 0 3px 0 rgba(255, 255, 255, 0.5);
 }
 
+.menu-card-tens {
+  background: linear-gradient(180deg, #7ec8ff 0%, #3aa0e8 55%, #1d7ec4 100%);
+  box-shadow: 0 8px 0 #145e96, 0 16px 26px rgba(16, 50, 110, 0.36), inset 0 3px 0 rgba(255, 255, 255, 0.5);
+}
+
+.menu-card-tens:active:not(:disabled) {
+  box-shadow: 0 3px 0 #145e96, 0 6px 12px rgba(16, 50, 110, 0.36), inset 0 3px 0 rgba(255, 255, 255, 0.5);
+}
+
+.menu-card-borrow {
+  background: linear-gradient(180deg, #d7b0ff 0%, #b56bff 55%, #9350e0 100%);
+  box-shadow: 0 8px 0 #6d32b4, 0 16px 26px rgba(60, 20, 110, 0.36), inset 0 3px 0 rgba(255, 255, 255, 0.5);
+}
+
+.menu-card-borrow:active:not(:disabled) {
+  box-shadow: 0 3px 0 #6d32b4, 0 6px 12px rgba(60, 20, 110, 0.36), inset 0 3px 0 rgba(255, 255, 255, 0.5);
+}
+
+.practice-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.practice-label {
+  margin: 0;
+  font-size: clamp(16px, 2.4vmin, 20px);
+  font-weight: 800;
+  line-height: 1.2;
+  color: #fff;
+  text-align: center;
+  text-shadow: 0 2px 0 rgba(60, 20, 120, 0.45);
+}
+
+.practice-cards {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--gap) * 1.6);
+}
+
 .menu-icon {
   flex: 0 0 auto;
   font-size: clamp(42px, 6.6vmin, 58px);
@@ -1796,9 +2060,24 @@ textarea:focus-visible {
   color: #d98a00;
 }
 
-.overlay[data-kind="fizzle"] .result-title {
+.overlay[data-kind="fizzle"] .result-title,
+.overlay[data-kind="retry"] .result-title {
   font-size: clamp(30px, 5vmin, 44px);
   color: #6a55c9;
+}
+
+.overlay[data-kind="retry"] .result-card {
+  background: linear-gradient(180deg, #fffdf2 0%, #fff3c4 100%);
+  border-color: var(--gold);
+}
+
+.overlay[data-kind="retry"] .scene {
+  --box: 72px;
+}
+
+.overlay[data-kind="retry"] .result-text {
+  font-size: clamp(20px, 3.2vmin, 26px);
+  max-width: 22em;
 }
 
 .result-text {
@@ -2664,7 +2943,7 @@ textarea:focus-visible {
     align-self: start;
   }
 
-  /* Three cards side by side; each speedy brew sits under its drill. */
+  /* Mixed, Make 10 and Doubles on the first row. Subtracting spans the row under them. */
   .potion-menu {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -2676,13 +2955,27 @@ textarea:focus-visible {
     display: contents;
   }
 
+  .practice-list {
+    grid-column: 1 / -1;
+  }
+
+  .practice-cards {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: calc(var(--gap) * 1.6);
+  }
+
   .menu-card:not(.menu-speedy) {
     flex-direction: column;
     justify-content: center;
-    gap: 6px;
-    min-height: 168px;
-    padding: 12px 14px;
+    gap: 4px;
+    min-height: clamp(96px, 16vh, 140px);
+    padding: 8px 12px;
     text-align: center;
+  }
+
+  .menu-card:not(.menu-speedy) .menu-icon {
+    font-size: clamp(32px, 5vh, 46px);
   }
 
   .tiles-alpha {
@@ -2748,6 +3041,31 @@ textarea:focus-visible {
 
   .panel-center {
     width: min(940px, 100%);
+  }
+}
+
+/* Upright iPads shorter than the tall 1180 layout: five choices, plus a speedy brew under a drill. */
+@media (orientation: portrait) and (max-height: 1120px) {
+  .menu-hero .caster {
+    width: clamp(80px, 10vh, 120px);
+  }
+
+  .menu-hint {
+    font-size: 20px;
+  }
+
+  .menu-card:not(.menu-speedy) {
+    min-height: 84px;
+    padding: 6px 16px;
+  }
+
+  .menu-name {
+    font-size: clamp(22px, 3.6vmin, 28px);
+  }
+
+  .menu-card.menu-speedy {
+    min-height: 60px;
+    padding: 4px 16px;
   }
 }
 

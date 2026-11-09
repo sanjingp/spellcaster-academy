@@ -6,6 +6,7 @@ window.SPELLCASTER_POTIONS = (() => {
   const randInt = (lo, hi) => lo + Math.floor(Math.random() * (hi - lo + 1));
   const pick = (list) => list[Math.floor(Math.random() * list.length)];
   const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  const tenPhrase = (n) => (n === 1 ? '1 ten' : `${n} tens`);
   const total = (list) => list.reduce((sum, n) => sum + n, 0);
   const range = (lo, hi) => Array.from({ length: hi - lo + 1 }, (_, i) => lo + i);
 
@@ -46,6 +47,14 @@ window.SPELLCASTER_POTIONS = (() => {
   const drills = [
     { id: 'make10', name: 'Make 10', icon: '🎯', color: '#ff9f43', teaser: 'What goes with 7?' },
     { id: 'doubles', name: 'Doubles', icon: '🍒', color: '#6c8cff', teaser: '6 + 6, then 6 + 7' },
+  ];
+
+  // Subtracting practice: two kinds, each its own button and its own round.
+  // A mixed round never draws from them, and a round never mixes the two kinds.
+  // `retries` is how many gentle hints she gets on one try before the potion fizzles.
+  const practices = [
+    { id: 'tens', name: 'Subtract tens', icon: '🔟', color: '#3aa0e8', teaser: 'Like 80 − 60', hello: 'Let’s subtract tens!' },
+    { id: 'borrow', name: 'Borrow', icon: '🧱', color: '#b56bff', teaser: 'Like 52 − 27', hello: 'Let’s borrow!' },
   ];
 
   // Short story problems, one sentence per line. Every number is 2 or more, so
@@ -177,6 +186,48 @@ window.SPELLCASTER_POTIONS = (() => {
         answer: String(a - b),
         solved: [`${a} − ${b} = `, String(a - b), ''],
         sayAnswer: `${a} minus ${b} is ${a - b}.`,
+      });
+    },
+
+    // Subtracting tens only: 80 − 60. The basic fact is 8 − 6 = 2, and the answer is 2 tens.
+    tens(a, b) {
+      const tensA = a / 10;
+      const tensB = b / 10;
+      const fact = tensA - tensB;
+      const answer = a - b;
+      return recipe('tens', `${a}-${b}`, {
+        title: 'Subtract the tens',
+        show: { type: 'tens', parts: [String(a), '−', String(b), '=', '?'], tens: tensA, take: tensB, fact },
+        say: `What is ${a} minus ${b}? ${tenPhrase(tensA)} minus ${tenPhrase(tensB)}.`,
+        answer: String(answer),
+        solved: [`${a} − ${b} = ${tenPhrase(tensA)} − ${tenPhrase(tensB)} = `, String(answer), ''],
+        sayAnswer: `${a} minus ${b} is ${answer}. ${tenPhrase(tensA)} minus ${tenPhrase(tensB)} is ${tenPhrase(fact)}.`,
+        label: `${a} − ${b} = ${answer}`,
+        retries: 1,
+        practice: { kind: 'tens', a, b, tensA, tensB, fact },
+      });
+    },
+
+    // Two-digit subtraction that needs a trade: the ones on top are smaller (52 − 27).
+    borrow(top, bottom) {
+      const T = Math.floor(top / 10);
+      const O = top % 10;
+      const B = Math.floor(bottom / 10);
+      const C = bottom % 10;
+      if (O >= C || top <= bottom || T < 2 || B < 1) return build.borrow(52, 27);
+      const ones = O + 10 - C;
+      const tens = T - 1 - B;
+      const answer = top - bottom;
+      return recipe('borrow', `${top}-${bottom}`, {
+        title: 'Trade a ten',
+        show: { type: 'borrow', top, bottom, tens: T, ones: O, subTens: B, subOnes: C },
+        say: `What is ${top} minus ${bottom}? The ones need a ten.`,
+        answer: String(answer),
+        solved: [`${top} − ${bottom} = `, String(answer), ''],
+        sayAnswer: `${top} minus ${bottom} is ${answer}.`,
+        label: `${top} − ${bottom} = ${answer}`,
+        retries: 2,
+        practice: { kind: 'borrow', top, bottom, T, O, B, C, ones, tens },
       });
     },
 
@@ -384,6 +435,145 @@ window.SPELLCASTER_POTIONS = (() => {
   // then `stretch` facts that build on them:
   //   make10   what goes with 7 to make 10?  then  8 + 5 by way of 10 (bigger number first)
   //   doubles  6 + 6                         then  6 + 7 and 7 + 6
+  // Every subtracting-tens problem (answers 0–90) or every borrowing problem.
+  // Borrowing problems are two-digit, need a trade, and stay between 1 and 99.
+  let tensCache = null;
+  let borrowCache = null;
+  function practiceProblems(kind) {
+    if (kind === 'borrow') {
+      if (!borrowCache) {
+        borrowCache = [];
+        for (let T = 2; T <= 9; T++) {
+          for (let B = 1; B < T; B++) {
+            for (let C = 1; C <= 9; C++) {
+              for (let O = 0; O < C; O++) borrowCache.push(build.borrow(T * 10 + O, B * 10 + C));
+            }
+          }
+        }
+      }
+      return borrowCache;
+    }
+    if (!tensCache) {
+      tensCache = [];
+      for (let a = 10; a <= 90; a += 10) {
+        for (let b = 0; b <= a; b += 10) tensCache.push(build.tens(a, b));
+      }
+    }
+    return tensCache;
+  }
+
+  // One round of a single kind. Problems she has missed come first (more often),
+  // then new ones. The two kinds are never put in the same list.
+  function practiceRound(kind, missed, count = 8) {
+    const all = practiceProblems(kind === 'borrow' ? 'borrow' : 'tens');
+    const weight = missed && typeof missed === 'object' ? missed : {};
+    const due = all
+      .filter((problem) => weight[problem.key] > 0)
+      .sort((a, b) => weight[b.key] - weight[a.key] || (a.key < b.key ? -1 : 1));
+    const reviewCount = Math.min(due.length, Math.max(0, count - 2));
+    const chosen = due.slice(0, reviewCount);
+    const seen = new Set(chosen.map((problem) => problem.key));
+    const rest = all.filter((problem) => !seen.has(problem.key));
+    const fresh = shuffle(rest.filter((problem) => !weight[problem.key]))
+      .concat(shuffle(rest.filter((problem) => weight[problem.key])));
+    for (const problem of fresh) {
+      if (chosen.length >= count) break;
+      chosen.push(problem);
+    }
+    return chosen.slice(0, count);
+  }
+
+  // A gentle hint for a wrong answer. It names what she did and lets her try again.
+  // The last step of a borrowing hint (attempt 1) says the answer; the first one shows the way.
+  function practiceHint(problem, guess, attempt = 0) {
+    const p = problem && problem.practice;
+    if (!p) return { close: false, title: 'Let’s look again', text: 'Have another try.', note: 'Have another try.' };
+    return p.kind === 'tens' ? tensHint(p, Number(guess)) : borrowHint(p, Number(guess), attempt);
+  }
+
+  function tensHint(p, guess) {
+    const answer = p.a - p.b;
+    const line = `${tenPhrase(p.tensA)} minus ${tenPhrase(p.tensB)} is ${tenPhrase(p.fact)}, which is ${answer}.`;
+    if (guess === p.fact && p.fact !== answer) {
+      const text = `Close! These are tens. ${line}`;
+      return { close: true, title: 'Close!', text, note: text };
+    }
+    const text = `Count the rods that are left. ${line}`;
+    return { close: false, title: 'Count the tens', text, note: text };
+  }
+
+  function borrowHint(p, guess, attempt) {
+    const answer = p.top - p.bottom;
+    const flipped = (p.C - p.O) + (p.T - p.B) * 10; // smaller digit minus bigger digit, in each column
+    const forgot = p.ones + (p.T - p.B) * 10; // ones traded, but the ten was not taken off the tens
+    const tensOnly = p.tens * 10;
+    const full = `Trade a ten. ${p.O + 10} minus ${p.C} is ${p.ones}. ${p.T - 1} minus ${p.B} is ${p.tens}. The answer is ${answer}.`;
+    const note = `${p.O + 10} − ${p.C} = ${p.ones}, then ${p.T - 1} − ${p.B} = ${p.tens}. That makes ${answer}.`;
+    if (attempt >= 1) return { close: false, title: 'Let’s put it together', text: full, note };
+    if (guess === flipped) {
+      const text = `Close! ${p.O} is smaller than ${p.C}, so we don’t take the little number from the big one. Trade a ten. Now you have ${p.O + 10} ones. ${p.O + 10} − ${p.C} = ${p.ones}.`;
+      return { close: true, title: 'Trade a ten', text, note: `Trade a ten: ${p.O + 10} − ${p.C} = ${p.ones}. Then the tens.` };
+    }
+    if (guess === forgot) {
+      const text = `The ones are right: ${p.ones}. You traded a ten, so the tens are ${p.T - 1} − ${p.B}, not ${p.T} − ${p.B}.`;
+      return { close: true, title: 'Check the tens', text, note: text };
+    }
+    if (guess === p.ones) {
+      const text = `That’s the ones: ${p.ones}. Now the tens. ${p.T - 1} − ${p.B} = ${p.tens}.`;
+      return { close: true, title: 'That’s the ones', text, note: text };
+    }
+    if (guess === tensOnly || guess === p.tens) {
+      const text = `That’s the tens: ${tenPhrase(p.tens)} is ${tensOnly}. The ones are ${p.ones} more.`;
+      return { close: true, title: 'That’s the tens', text, note: `${tenPhrase(p.tens)} and ${p.ones} ones make ${answer}.` };
+    }
+    if (guess === p.T - p.B) {
+      const text = `Trade a ten first. ${p.T} tens becomes ${p.T - 1}, and the ones become ${p.O + 10}.`;
+      return { close: false, title: 'Trade a ten', text, note: text };
+    }
+    const text = `Look at the ones. ${p.O} is smaller than ${p.C}, so trade a ten. ${p.O + 10} − ${p.C} = ${p.ones}. Then the tens: ${p.T - 1} − ${p.B} = ${p.tens}.`;
+    return { close: false, title: 'Trade a ten', text, note: `${p.O + 10} − ${p.C} = ${p.ones}. Then ${p.T - 1} − ${p.B} = ${p.tens}.` };
+  }
+
+  // Which subtracting problems to ask again. A new key, never mixed into the old save.
+  //   missed – problem key -> how many times that try was missed (higher comes first)
+  function cleanSubtract(raw) {
+    const missed = {};
+    const bag = raw && typeof raw === 'object' ? raw.missed : null;
+    if (bag && typeof bag === 'object') {
+      for (const [key, count] of Object.entries(bag)) {
+        if (!/^(tens|borrow):\d+-\d+$/.test(key)) continue;
+        const n = Math.floor(Number(count));
+        if (n > 0 && n < 100) missed[key] = n;
+      }
+    }
+    trimMissed(missed);
+    return { missed };
+  }
+
+  function trimMissed(missed) {
+    const keys = Object.keys(missed);
+    if (keys.length <= 40) return;
+    keys.sort((a, b) => missed[a] - missed[b] || (a < b ? -1 : 1));
+    for (const key of keys.slice(0, keys.length - 40)) delete missed[key];
+  }
+
+  // The first stumble: remember it so the next round starts here, without piling on.
+  function touchMiss(store, key) {
+    if (!store.missed[key]) store.missed[key] = 1;
+    trimMissed(store.missed);
+  }
+
+  // The try fizzled: it should come back even sooner than the others.
+  function noteMiss(store, key) {
+    store.missed[key] = (store.missed[key] || 0) + 1;
+    trimMissed(store.missed);
+  }
+
+  // She solved it on the first try this time, so it can rest.
+  function forgetMiss(store, key) {
+    delete store.missed[key];
+  }
+
   function drillFacts(id) {
     if (id === 'doubles') {
       return {
@@ -454,5 +644,9 @@ window.SPELLCASTER_POTIONS = (() => {
     'Your cauldron is still warming up.',
   ];
 
-  return { levels, topics, drills, stories, build, makeProblem, makeRound, drillFacts, brews, cheers, fizzles };
+  return {
+    levels, topics, drills, practices, stories, build, makeProblem, makeRound, drillFacts,
+    practiceProblems, practiceRound, practiceHint, cleanSubtract, touchMiss, noteMiss, forgetMiss,
+    brews, cheers, fizzles,
+  };
 })();

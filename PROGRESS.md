@@ -1,6 +1,33 @@
 # Progress
 
-Last updated: 2026-10-12
+Last updated: 2026-11-09
+
+## Subtracting practice — two separate modes
+
+Mila is learning two kinds of subtraction, and they are never mixed in one round.
+
+- **Potions menu.** Under the old choices, a line says “Subtracting — pick one”, then two buttons:
+  **Subtract tens** (like 80 − 60) and **Borrow** (like 52 − 27). Home → Potions → one of those.
+- **Subtract tens.** Only multiples of ten, answers 0–90, never a negative. Ten-rods show which
+  bundles stay and which are taken away, with the basic fact under them (8 − 6 = 2 tens).
+  If she answers the ones fact (2 for 80 − 60), a card says
+  “Close! These are tens. 8 tens minus 6 tens is 2 tens, which is 20.” and she tries again.
+  A second miss shows the answer kindly and the same problem comes back after one other potion.
+- **Borrow.** Every problem needs a trade (the ones digit on top is smaller). The card shows the
+  written form with the old digits crossed out, the new tens, and the borrowed 1, beside the rods
+  with one ten broken into 10 ones. A wrong answer gets a step hint (for example she took the
+  little digit from the big one). A second miss puts the whole answer together. A third miss
+  shows it kindly and the problem comes back after one other potion.
+- Missed problems are remembered under a **new** key, `spellcaster-academy-subtract-v1`, and lead
+  the next round of that same kind. The game save and the addition-fact memory are not reshaped.
+  Resetting stars and progress clears this list too. A helped success earns 1 star; a first try
+  earns 2. Nothing is taken away.
+- `npm test -- subtract` covers the recipes, both rounds, the hints, the quicker return, the
+  separate menus on every iPad size, and that mixed potions and Spells still open.
+  That run is 279 checks. Potions rounds, settings, recipes, tight screens, speedy brew, and the
+  math-fix scenarios still pass. A full `npm test` still reports older spelling failures: this
+  week’s word list is loaded automatically, and several older tests still expect only the starter
+  list. Those failures are not from this change.
 
 ## Status
 

@@ -9,6 +9,7 @@
   const FACTS = window.SPELLCASTER_FACTS;
   const STORE_KEY = 'spellcaster-academy-v1';
   const FACTS_KEY = 'spellcaster-academy-facts-v1'; // fact memory has a key of its own; the save above is left as it was
+  const SUBTRACT_KEY = 'spellcaster-academy-subtract-v1'; // subtracting practice has a key of its own too
 
   const MIN_LEN = 2;
   const MAX_LEN = 12;
@@ -29,6 +30,7 @@
   const PROBLEM_SLOW_RATE = 0.65; // a whole sentence, so not quite as slow as one word
   const PEEK_MS = 2600;
   const RETRY_GAP = 3; // a missed spell or potion comes back after this many others
+  const PRACTICE_GAP = 1; // a missed subtracting problem comes back sooner, after one other
   // The longest a sentence is taken to last when the browser never says it is done:
   // a moment to start, and a generous while for every letter (at normal speed).
   const TALK_LEAD_MS = 1000;
@@ -245,8 +247,21 @@
 
   const saveFacts = () => keep(FACTS_KEY, factStore);
 
+  // Subtracting practice: which tens and borrowing problems to ask again.
+  // Kept apart from the game save and the addition facts, so neither is rewritten.
+  function loadSubtract() {
+    try {
+      return POTIONS.cleanSubtract(JSON.parse(window.localStorage.getItem(SUBTRACT_KEY) || 'null'));
+    } catch (err) {
+      return POTIONS.cleanSubtract(null);
+    }
+  }
+
+  const saveSubtract = () => keep(SUBTRACT_KEY, subtractStore);
+
   let state = loadState();
   let factStore = loadFacts();
+  let subtractStore = loadSubtract();
 
   function progressFor(word) {
     if (!Object.prototype.hasOwnProperty.call(state.progress, word)) {
@@ -1274,6 +1289,11 @@
     if (resultBox.hidden || !session) return;
     if (Date.now() - resultShownAt < 350) return; // ignore a stray double-tap
     hideResult();
+    // A subtracting hint stays on the same problem so she can try again.
+    if (session.mode === 'potions' && brew && brew.hold) {
+      resumeBrew();
+      return;
+    }
     if (session.mode === 'potions') nextBrew();
     else nextTurn();
   }
@@ -1335,6 +1355,7 @@
   // Every drill with all its facts, as ready problems: { id, name, icon, color, teaser, core, stretch }.
   const DRILLS = POTIONS.drills.map((drill) => ({ ...drill, ...POTIONS.drillFacts(drill.id) }));
   const drillOf = (id) => DRILLS.find((drill) => drill.id === id) || null;
+  const practiceOf = (id) => POTIONS.practices.find((practice) => practice.id === id) || null;
   const factKey = (problem) => problem.fact.key;
 
   // Addition facts that are due for another go take the place of fresh sums in
@@ -1382,9 +1403,13 @@
   // `kind` is 'mixed' or a drill id; `speedy` turns a drill into its speedy brew.
   function startBrewRound(kind = 'mixed', speedy = false) {
     const drill = drillOf(kind);
-    const problems = !drill
-      ? POTIONS.makeRound(state.math, POTIONS_PER_ROUND, reviewFacts(Date.now()))
-      : speedy ? speedyProblems(drill) : drillProblems(drill, Date.now());
+    const practice = practiceOf(kind);
+    // A practice round is one kind only: subtracting tens, or borrowing. Never both, and never mixed potions.
+    const problems = practice
+      ? POTIONS.practiceRound(practice.id, subtractStore.missed, POTIONS_PER_ROUND)
+      : !drill
+        ? POTIONS.makeRound(state.math, POTIONS_PER_ROUND, reviewFacts(Date.now()))
+        : speedy ? speedyProblems(drill) : drillProblems(drill, Date.now());
     const items = problems.map((problem) => ({
       problem,
       misses: 0,
@@ -1392,7 +1417,9 @@
       stars: 0,
     }));
     session = {
-      mode: 'potions', kind: drill ? drill.id : 'mixed', speedy: !!drill && speedy,
+      mode: 'potions',
+      kind: practice ? practice.id : drill ? drill.id : 'mixed',
+      speedy: !!drill && speedy,
       items, queue: items.slice(), earned: 0, unlocks: [], right: 0, ms: 0,
     };
     hideResult();
@@ -1407,7 +1434,10 @@
       return;
     }
     const item = session.queue.shift();
-    brew = { item, problem: item.problem, placed: [], busy: false, startedAt: 0, talkedBefore: 0, away: false, view: null, helped: false };
+    brew = {
+      item, problem: item.problem, placed: [], busy: false, startedAt: 0, talkedBefore: 0,
+      away: false, view: null, helped: false, tries: 0, hold: false, hintText: '',
+    };
     // A fact that fizzled last time comes back with its dots already showing.
     const fact = item.problem.fact;
     const saved = fact ? FACTS.get(factStore, fact.key) : null;
@@ -1495,6 +1525,91 @@
       box.setAttribute('role', 'img');
       box.setAttribute('aria-label', `${plural(tens, 'ten-rod')} and ${plural(ones, 'ones-cube')}`);
       return box;
+    },
+
+    // Subtracting tens: the rods that stay, then the rods to take away, plus the basic fact.
+    tens({ parts, tens, take, fact }) {
+      const box = el('div', 'tens-take');
+      box.append(problemArt.equation({ parts }));
+      const rods = el('div', 'tens-rods');
+      const keep = tens - take;
+      const pile = (count, gone) => {
+        const group = el('div', `tens-group${gone ? ' is-away' : ''}`);
+        const stack = el('div', 'tens-pile');
+        for (let i = 0; i < count; i++) {
+          const rod = el('span', gone ? 'pv-rod is-gone' : 'pv-rod');
+          if (gone) rod.append(el('span', 'rod-slash'));
+          stack.append(rod);
+        }
+        group.append(stack, el('span', 'tens-tag', gone ? 'take away' : 'left'));
+        return group;
+      };
+      if (keep) rods.append(pile(keep, false));
+      if (take) rods.append(pile(take, true));
+      const left = fact === 1 ? '1 ten is left' : `${fact} tens are left`;
+      rods.setAttribute('role', 'img');
+      rods.setAttribute('aria-label', `${plural(tens, 'ten-rod')}. Take away ${take}. ${left}.`);
+      const factLine = el('p', 'tens-fact', `${tens} − ${take} = ${fact === 1 ? '1 ten' : `${fact} tens`}`);
+      box.append(rods, factLine);
+      return box;
+    },
+
+    // Borrowing: the written form with the traded ten, beside the rods and the 10 ones.
+    borrow(show) {
+      const { top, bottom, tens, ones, subTens, subOnes } = show;
+      const board = el('div', 'borrow-board');
+      board.dataset.borrowTop = String(top);
+      board.dataset.borrowBottom = String(bottom);
+      const paper = el('div', 'borrow-paper');
+      paper.setAttribute('role', 'img');
+      paper.setAttribute('aria-label',
+        `${top} minus ${bottom}. The ${tens} becomes ${tens - 1}, and the ${ones} becomes ${ones + 10}.`);
+      const cell = (className, text) => el('span', className, text);
+      const traded = el('span', 'bp-new bp-traded');
+      traded.append(el('span', 'bp-borrowed', '1'), el('span', 'bp-one', String(ones)));
+      traded.setAttribute('aria-label', `${ones + 10}`);
+      const line = el('span', 'bp-line');
+      paper.append(
+        cell('bp-mark', ''),
+        cell('bp-old', String(tens)),
+        cell('bp-old', String(ones)),
+        cell('bp-mark', ''),
+        cell('bp-new', String(tens - 1)),
+        traded,
+        cell('bp-mark', '−'),
+        cell('bp-num', String(subTens)),
+        cell('bp-num', String(subOnes)),
+        line,
+        cell('bp-mark', ''),
+        cell('bp-blank', '?'),
+        cell('bp-blank', '?'),
+      );
+
+      const blocks = el('div', 'blocks borrow-blocks');
+      const tensLeft = tens - 1;
+      const whole = el('div', 'blocks-group');
+      const wholePile = el('div', 'blocks-pile blocks-tens');
+      for (let i = 0; i < tensLeft; i++) wholePile.append(el('span', 'pv-rod'));
+      whole.append(wholePile, el('span', 'blocks-name', 'tens'));
+      const crack = el('div', 'blocks-group');
+      const crackPile = el('div', 'blocks-pile');
+      crackPile.append(el('span', 'pv-rod is-cracked'));
+      crack.append(crackPile, el('span', 'blocks-name', 'trade'));
+      const onesGroup = el('div', 'blocks-group');
+      const piles = el('div', 'ones-piles');
+      const had = el('div', 'blocks-pile blocks-ones');
+      for (let i = 0; i < ones; i++) had.append(el('span', 'pv-cube'));
+      const fromTen = el('div', 'blocks-pile blocks-ones blocks-from-ten');
+      for (let i = 0; i < 10; i++) fromTen.append(el('span', 'pv-cube is-traded'));
+      fromTen.setAttribute('aria-label', '10 ones from the traded ten');
+      piles.append(had, fromTen);
+      onesGroup.append(piles, el('span', 'blocks-name', 'ones'));
+      blocks.append(whole, crack, onesGroup);
+      blocks.setAttribute('role', 'img');
+      blocks.setAttribute('aria-label',
+        `${plural(tensLeft, 'ten-rod')} still whole, 1 ten broken into 10 ones, and ${plural(ones, 'one')} already there.`);
+      board.append(paper, blocks);
+      return board;
     },
 
     sequence({ items }) {
@@ -1653,20 +1768,24 @@
   function renderHelper() {
     const fact = brew.problem.fact;
     const canHelp = !!fact && !session.speedy;
+    const reminding = !!(brew.hintText && !session.speedy);
     const view = canHelp ? brew.view : null;
     $('#brew-help').hidden = !canHelp;
     noteBox.hidden = !session.speedy;
-    helperBox.hidden = !view;
+    noteBox.textContent = SPEEDY_NOTE;
+    noteBox.classList.remove('is-almost');
+    helperBox.hidden = !view && !reminding;
     helperBox.textContent = '';
-    helperBox.dataset.view = view || '';
-    problemBox.classList.toggle('is-helping', !!view);
+    helperBox.dataset.view = reminding ? 'practice' : (view || '');
+    problemBox.classList.toggle('is-helping', !!view || reminding);
     for (const [name, btn] of [['dots', $('#btn-dots')], ['hint', $('#btn-hint')]]) {
       btn.classList.toggle('is-on', view === name);
       btn.setAttribute('aria-pressed', String(view === name));
       btn.disabled = brew.busy;
     }
-    if (view === 'dots') helperBox.append(tenFrames(fact));
-    if (view === 'hint') {
+    if (reminding) helperBox.append(el('p', 'practice-hint', brew.hintText));
+    else if (view === 'dots') helperBox.append(tenFrames(fact));
+    else if (view === 'hint') {
       const hint = hints[fact.hint](fact);
       helperBox.append(el('p', 'hint-caption', hint.caption), hint.row);
     }
@@ -1684,9 +1803,11 @@
 
   function renderBrew() {
     const { problem } = brew;
-    const topic = POTIONS.topics.find((t) => t.id === problem.topic) || drillOf(problem.topic);
+    const topic = POTIONS.topics.find((t) => t.id === problem.topic) || drillOf(problem.topic) || practiceOf(problem.topic);
     brewScreen.dataset.topic = problem.topic;
-    brewScreen.dataset.mode = session.speedy ? 'speedy' : session.kind === 'mixed' ? 'mixed' : 'drill';
+    brewScreen.dataset.mode = session.speedy ? 'speedy'
+      : session.kind === 'mixed' ? 'mixed'
+        : practiceOf(session.kind) ? 'practice' : 'drill';
     brewScreen.classList.remove('is-casting-ok', 'is-casting-fizzle');
     brewScreen.style.setProperty('--potion', topic.color);
     $('#brew-icon').textContent = session.speedy ? '⚡' : topic.icon;
@@ -1780,6 +1901,18 @@
     const ms = thinkingTime();
     brew.busy = true;
     refreshBrewBoard(false);
+    // Subtracting practice: a miss gets a hint and another try, instead of leaving the problem.
+    const chances = brew.problem.retries || 0;
+    if (!ok && !session.speedy && chances && brew.tries < chances) {
+      const hint = POTIONS.practiceHint(brew.problem, brew.placed.join(''), brew.tries);
+      brew.tries += 1;
+      brew.item.misses += 1;
+      POTIONS.touchMiss(subtractStore, brew.problem.key);
+      saveSubtract();
+      chimes.tap();
+      showPracticeHint(hint);
+      return;
+    }
     rememberFact(ok, ms);
     const cauldron = $('#cauldron');
     castEffects(brewScreen, ok, { sparkle: cauldron, slots: brewSlots, smoke: cauldron });
@@ -1791,6 +1924,36 @@
     setTimeout(() => {
       if (brew === thisBrew && activeScreen === 'brew') showBrewResult(info);
     }, calm() ? 150 : 950);
+  }
+
+  // The hint card. "Try again" comes back to this same problem with the answer cleared.
+  function showPracticeHint(hint) {
+    brew.hold = true;
+    brew.hint = hint;
+    const title = $('#result-title');
+    const text = $('#result-text');
+    const nextBtn = $('#btn-next');
+    clearResultCard();
+    $('#result-word').textContent = '';
+    $('#result-word').classList.remove('is-solved');
+    resultBox.dataset.kind = 'retry';
+    title.textContent = hint.title;
+    renderScene($('#result-scene'), { main: hint.close ? '💡' : '🦉', hat: '✨', move: 'wobble' });
+    text.textContent = hint.text;
+    nextBtn.textContent = 'Try again 💜';
+    speech.say(hint.text, { rate: 0.95 });
+    openResultCard();
+  }
+
+  function resumeBrew() {
+    if (!brew) return;
+    brew.hold = false;
+    brew.busy = false;
+    brew.placed = [];
+    brew.hintText = brew.hint ? brew.hint.note : '';
+    brewScreen.classList.remove('is-casting-ok', 'is-casting-fizzle');
+    renderHelper();
+    refreshBrewBoard(false);
   }
 
   // An addition fact goes into the fact memory: right or not, how long it took,
@@ -1851,6 +2014,7 @@
   function settleBrew(ok) {
     const item = brew.item;
     const info = { ok, problem: item.problem, stars: 0, unlocks: [] };
+    const practice = !!item.problem.practice;
     if (ok) {
       item.done = true;
       item.stars = item.misses === 0 ? 2 : 1;
@@ -1861,12 +2025,16 @@
       info.stars = item.stars;
       info.unlocks = newUnlocks(before, state.stars);
       session.unlocks.push(...info.unlocks);
+      if (practice && brew.tries === 0) POTIONS.forgetMiss(subtractStore, item.problem.key);
     } else {
       // Missed: the same potion comes back a few turns later.
+      // A subtracting problem comes back after just one other, so it is practiced more often.
       item.misses += 1;
-      requeue(item, RETRY_GAP, true);
+      if (practice) POTIONS.noteMiss(subtractStore, item.problem.key);
+      requeue(item, practice ? PRACTICE_GAP : RETRY_GAP, true);
     }
     saveState();
+    if (practice) saveSubtract();
     return info;
   }
 
@@ -1926,6 +2094,7 @@
   // Potions menu: mixed potions, the fact drills and, once earned, their speedy brews
   // ------------------------------------------------------------------
   const drillList = $('#drill-list');
+  const practiceList = $('#practice-list');
   const took = (ms) => plural(Math.max(1, Math.round(ms / 1000)), 'second');
 
   // A speedy brew is offered once every core fact of its drill is quick. After
@@ -1964,6 +2133,18 @@
         group.append(card, speedy);
         drillList.append(group);
       }
+    }
+    if (practiceList && !practiceList.querySelector('.menu-card')) {
+      const label = el('p', 'practice-label', 'Subtracting — pick one');
+      const cards = el('div', 'practice-cards');
+      for (const practice of POTIONS.practices) {
+        const card = menuCard(`menu-card-${practice.id}`, practice.icon, practice.name);
+        card.id = `btn-practice-${practice.id}`;
+        card.dataset.practice = practice.id;
+        $('.menu-sub', card).textContent = practice.teaser;
+        cards.append(card);
+      }
+      practiceList.append(label, cards);
     }
     for (const drill of DRILLS) {
       const keys = drill.core.map(factKey);
@@ -2331,8 +2512,10 @@
     state.robe = DATA.robes[0].id;
     state.familiar = DATA.familiars[0].id;
     factStore = FACTS.fresh(); // fact memory and speedy bests are progress too
+    subtractStore = POTIONS.cleanSubtract(null); // subtracting practice is progress too
     saveState();
     saveFacts();
+    saveSubtract();
     renderCasters();
     renderStars();
     renderParent();
@@ -2370,14 +2553,16 @@
     // This runs inside the tap, which is what lets Safari speak and chime.
     const potions = mode === 'potions';
     const drill = potions ? drillOf(kind) : null;
+    const subtracting = potions ? practiceOf(kind) : null;
     // A speedy brew whose facts have slipped is a round of practice first.
-    const practice = speedy && !(drill && speedyReady(drill));
+    const warming = speedy && !(drill && speedyReady(drill));
     chimes.unlock();
     speech.say(!potions ? 'Let’s cast some spells!'
-      : practice ? 'Let’s warm up with a little practice first!'
-        : speedy ? 'Speedy brew! No rush, just have fun!' : 'Let’s brew some potions!', { rate: 0.95, pitch: 1.2 });
+      : subtracting ? subtracting.hello
+        : warming ? 'Let’s warm up with a little practice first!'
+          : speedy ? 'Speedy brew! No rush, just have fun!' : 'Let’s brew some potions!', { rate: 0.95, pitch: 1.2 });
     speech.scheduleCheck();
-    if (potions) startBrewRound(kind, speedy && !practice);
+    if (potions) startBrewRound(kind, speedy && !warming);
     else startRound();
   }
 
@@ -2402,6 +2587,12 @@
     const btn = event.target.closest('.menu-card');
     if (btn) begin('potions', btn.dataset.drill || btn.dataset.speedy, !!btn.dataset.speedy);
   });
+  if (practiceList) {
+    practiceList.addEventListener('click', (event) => {
+      const btn = event.target.closest('.menu-card');
+      if (btn && btn.dataset.practice) begin('potions', btn.dataset.practice);
+    });
+  }
   $('#btn-again').addEventListener('click', () => {
     if (session) begin(session.mode, session.kind, session.speedy);
     else begin('spells');
